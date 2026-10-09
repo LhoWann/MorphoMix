@@ -50,6 +50,7 @@ agent_space/
 .claude/
 .agents/
 CLAUDE.md
+docs
 
 # LaTeX build artefacts
 *.aux
