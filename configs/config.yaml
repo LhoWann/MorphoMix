@@ -1,0 +1,213 @@
+deterministic: true
+seeds: [42, 43, 44, 45, 46]  # 45-46 added after the CBM-style review (2026-10-05): seed-level inference
+primary_seed: 42
+headline_arms: ['basic', 'hed_jitter', 'randstainna', 'stain_mixup', 'morpho_mix']   # every arm runs every seed
+ablation_seeds: [42, 43, 44]  # arm (a) reuses the headline morpho_mix run of each seed
+img_size: 224
+results_dir: 'results'
+aria_annotation_box: [0.84, 1.0, 0.84, 1.0]   # Aria scale-bar corner (y0, y1, x0, x1), painted out by `prepare`
+# Aria field groups (`python main.py split`): captures of one smear field, shifted by up to ~50 px, form one group,
+# which the paired bootstrap of `stats` resamples as a unit
+aria_groups:
+  csv: 'data/processed/splits/aria_groups.csv'
+  min_inliers: 12              # SIFT + RANSAC similarity inliers
+  min_ncc: 0.80                # grey NCC over the shared area (distinct fields: p99 0.18)
+  min_overlap: 0.10            # shared fraction of the frame
+# ALL-IDB2 crops of one cell (`python main.py split --allidb2`, same matching thresholds): one bootstrap unit each
+allidb2_groups:
+  csv: 'data/processed/splits/allidb2_groups.csv'
+
+# Model: ConvNeXt V2 Atto
+model_name: 'convnextv2_atto'
+pretrained: true
+# Fine-tuning recipe after ConvNeXt V2 (Woo et al., CVPR 2023): Table 9 (Atto IN-1K fine-tuning) for base lr, layer
+# decay, betas, drop path and head init; Appendix A.3 / A.4 (downstream transfer) for weight decay. Not adopted from
+# Table 9: batch 1024, 600 epochs, 0 warm-up epochs (5 here), EMA 0.9999 (off here, a screening candidate), RandAug
+# and label smoothing (they would confound the augmentation comparison). Table 9 already has mixup / cutmix at 0 for
+# Atto. Added here: grad-norm clipping at 1.0 and a 2 % cosine floor.
+dropout: 0.0                 # Table 9 has no head dropout
+drop_path: 0.1               # Table 9, Atto
+head_init_scale: 0.001       # Table 9
+
+# Augmentation arms
+augmentations: ['basic', 'hed_jitter', 'randstainna', 'stain_mixup', 'morpho_mix']
+# Stain baselines (src/augmentations/stain_baselines.py): foreground pixels only (C-NMC's black crop background holds
+# no stain), per sample with stain_prob, the convention of appearance_prob; labels are never mixed
+stain_prob: 0.5
+hed_sigma: 0.05                # Tellez et al. (2018; 2019 HED-light): alpha ~ U[1 -/+ s], beta ~ U[-/+ s]; strong: 0.2
+randstainna_std_hyper: -0.3    # RandStainNA reference code (normal distribution, Lab)
+randstainna_stats: 'data/processed/randstainna_stats.json'  # train-set template distribution, written by `prepare`
+# stain_mixup: Macenko matrices of the MLL23 style bank (style_bank.path, key stain_matrix), intensity U[0.95, 1.05]
+
+# MorphoMix: one Azure-B cell mask (tau) drives C1, C2', C3 and C4 (execution order C1, C4 / C2', C3). Final
+# composition (2026-10-06, test-guided, docs/decision_log.md): C1 as the MLL23 bank transfer (appearance_prob)
+# + C2' + C3, the former ablation arm e; the in-cell RandStainNA form (rsn_prob) is now ablation arm e, C4 is off
+morpho_threshold: 0.20       # tau
+# C1 stain transfer, no learned model: per sample a reference from the MLL23 style bank (`style_bank`) or, with
+# virtual_template_prob, a virtual template from a Gaussian fitted to the bank; nucleus and cytoplasm are matched to
+# it separately (per-region Lab Reinhard, 1 px seam, sd ratio <= 3) and the cell moves towards the result by
+# a ~ U[appearance_alpha]; pixels outside the mask never change. prob 0 = off
+appearance_prob: 0.5
+appearance_alpha: [0.5, 1.0]
+virtual_template_prob: 0.5
+# optional part of C1: light defocus blur, sensor noise and gamma inside the cell; off until screened (`screen`, acq)
+acquisition_prob: 0.0
+# RandStainNA hybrid at the C1 stage (exploratory, test-guided; `tune` hyb- candidates): per sample with rsn_prob the
+# randstainna arm's recolouring (foreground, randstainna_stats, randstainna_std_hyper) instead of C1. Independent
+# draws, RandStainNA takes precedence: C1 then fires with appearance_prob * (1 - rsn_prob). 0 = off (ablation arm e
+# turns it on in place of the MLL23 form)
+rsn_prob: 0.0
+# MLL23 style bank of C1 (and stain_mixup), built by `prepare` straight from the raw MLL23 TIFs (labels unused): per
+# cell the Lab mean / sd of nucleus and cytoplasm and a stain matrix. The MLL23 mask is the centre nucleus plus a
+# `ring` px cytoplasm ring of HSV saturation > `min_sat` (src/datasets/cells.py:nucleus_cell), because the Azure-B
+# prior also passes the erythrocytes; tau and img_size are the ones above
+style_bank:
+  path: 'data/processed/style_bank_mll23.npz'  # + style_bank_mll23.json, the provenance `prepare` compares
+  source_dir: 'data/raw/MLL23'
+  ring: 20
+  min_sat: 45
+# Auxiliary training cells (exploratory, test-guided, adopted 2026-10-05): Bodzas et al., Sci Data 2023 (Ostrava, MGG,
+# 100x oil, CC0), `positive` classes as ALL and `negative` classes as Normal, cut to the C-NMC format by `prepare`
+# (`scripts/data.py:prepare_aux_cells`, `src/datasets/cells.py:smear_cell`) and added to the training set of every
+# arm. Both labels come from that laboratory and n_positive / n_negative follow C-NMC's class ratio (68 % ALL), so
+# the source carries no label; the RandStainNA fit stays on C-NMC. Ablation arm f turns it off. MLL23 myeloblasts vs
+# lymphocytes were tried first and rejected (docs/decision_log.md)
+aux_train:
+  enabled: true
+  dir: 'data/processed/train_aux_bodzas2023'
+  positive: ['Lymphoblast']
+  negative: ['Lymphocyte', 'Monocyte']
+  n_positive: 2250
+  n_negative: 1049
+  max_area: 0.30               # of the frame; larger masks are clusters or failed masks
+  colour_matched_dir: 'data/processed/train_aux_bodzas2023_cmatch'  # the same cells, cell pixels Reinhard-matched
+                               # to the mean C-NMC template (prepare; control arm g: no slide-colour cue)
+# The former C2 (cell zoom ~ U[0.73, 1.27], p 0.66) was removed on 2026-10-03: removing it raised val, ALL-IDB2 and
+# Aria ROC-AUC in the first cross-lab ablation (test-guided, docs/decision_log.md). C2' and C4 replace it; both are
+# aimed at Aria's whole fields (white cells ~27 px at 224, against ~100 px for a C-NMC cell; many cells per image) and
+# were chosen with the test results known. C4 is off in the final composition: in the local proxy (2 seeds) adding
+# it to C2' lowered val and Aria ROC-AUC; with C2' at 0.25, 3/4 of every batch keep the single-cell training format.
+# C2' small cell: the cell shrunk to an equivalent diameter t ~ U[small_cell_px] px (field scale; never enlarged),
+# kept small at a random position (whole-field format) or, with small_cell_lowdetail_prob, zoomed back to its own size
+# (field detail at the training scale, the format of cell-by-cell field inference). prob 0 = off
+small_cell_prob: 0.25
+small_cell_px: [24, 48]      # Aria white cells ~27 px; up to 48 px for larger cells and other magnifications
+small_cell_lowdetail_prob: 0.5
+# C4 multi-cell field: n ~ U{field_cells} same-class cells of the batch (own cell first, drawn with replacement), each
+# at t ~ U[small_cell_px] px, rotated and mirrored, one per slot of a 4 x 4 grid (no overlap); label unchanged. A
+# sample gets C4 or C2', never both. prob 0 = off
+field_prob: 0.0
+field_cells: [2, 8]          # the same range for both classes, so the cell count carries no label
+# C3 background: everything outside the mask becomes a synthetic smear; C2' small cells and C4 fields always get one,
+# with field_rbc small (~15-20 px) erythrocytes. With use_background false they stay on black, like C-NMC
+use_background: true
+background_prob: 0.3818
+background_rbc: [5, 25]      # erythrocytes per background
+field_rbc: [40, 120]         # per field-scale background (Aria fields are packed with erythrocytes)
+feather_edges: true
+# background_prob was set by hand under the earlier batch-48 recipe; not re-tuned yet
+
+# Training protocol shared by every arm
+# EMA of the weights, validated and saved instead of the raw ones; 0 = off. Table 9 uses 0.9999 over ~750k
+# steps; this grid had ~2.5k steps (30 epochs x 83 before the auxiliary cells; now x 109), so the screening candidate is 0.998 (a ~500-step, ~6-epoch
+# horizon); off until screened.
+ema_decay: 0.0
+# Resolution degradation (src/augmentations/transforms.py:degrade_resolution), every arm, after the arm's own
+# augmentation: per sample with lowres_prob, area downsampling to s x the side, s ~ U[lowres_scale], and bilinear
+# upsampling back. A C-NMC cell is ~100 px at 224, an Aria cell ~27 px, so s = 0.25 matches Aria's detail. 0 = off
+lowres_prob: 0.0
+lowres_scale: [0.25, 0.75]
+# MixStyle (Zhou et al., ICLR 2021; src/training/mixstyle.py), every arm, training only: after each listed stage
+# (0-3), with probability mixstyle_p per batch, the channel mean / sd of each sample are mixed with another sample's,
+# lambda ~ Beta(alpha, alpha). 0 = off; `tune` candidates with MIXSTYLE (scripts/experiments.py)
+mixstyle_p: 0.0
+mixstyle_alpha: 0.1
+mixstyle_stages: [0, 1]
+
+# Hardware: Google Colab A100, 12 vCPU
+batch_size: 128              # same for every arm; 109 steps / epoch on 13,960 images, lr follows by linear scaling
+grad_accum_steps: 1
+mixed_precision: 'bf16'      # native on Ampere, no GradScaler
+channels_last: true          # NHWC Tensor-Core kernels
+num_workers: 11              # the Azure-B prior of the MorphoMix arm is computed on CPU in the workers; the Colab
+                             # A100 VM has 12 vCPUs (a previous run with 8 workers waited on data for 10-35 % of a step)
+eval_num_workers: 8
+prefetch_factor: 4
+persistent_workers: true
+log_every: 5
+# Resource monitor (src/utils/resources.py): a thread samples CPU, RAM, /dev/shm and GPU every `interval` s; per-epoch
+# rows with the data-loader wait go to {results_dir}/logs/resources.csv, raw samples to resources_samples.csv.
+# `python main.py resources` prints per-run averages and bottleneck flags. Reads counters only: results unchanged.
+resources:
+  enabled: true
+  interval: 5.0                # s
+  raw_samples: true
+
+# Evaluation
+tta_views: 8                 # dihedral views
+xai_stages: [-3, -2, -1]     # Layer-CAM reported at stages 2, 3 and 4, none picked
+# Test-time inference (src/evaluation/predict.py), used by every test scoring (`pretrain`, `all`, `tune`, `rescore`).
+# Exploratory: chosen after the test cohorts were read (docs/decision_log.md, 2026-10-03; aggregate and threshold
+# rule compared on the tests). The first cross-lab run used field: resize, decision_threshold: 0.5.
+inference:
+  field: 'cells'               # whole-field cohorts: resize (field resized to img_size) | cells (cell by cell)
+  field_cohorts: ['aria']
+  cells:                       # src/evaluation/field_inference.py
+    scale: 4.5                 # crop window img_size / scale field px; 3.6 (Aria cells ~26 px to C-NMC's ~95 px) was
+                               # the a priori value, 4.5 chosen on the tests (2026-10-05); a list averages over scales
+    min_radius: 6              # px in the field; smaller distance-transform maxima are platelets or fragments
+    min_inside: 0.8            # whole-cell filter (2026-10-05, test-guided): drop cells cut by the field border
+    min_nucleus: 0.2           # and cells without Azure-B nucleus pixels (erythrocytes); 0 = off
+    aggregate: 'mean'          # field p(ALL) from its cells: mean | max | topk (mean of the top_k) | frac (>= 0.5)
+    top_k: 3
+  # ALL iff p(ALL) >= t: a number | val_youden (Youden on the run's val predictions) | prior_shift (EM on the
+  # unlabelled test scores). Tables and stats resolve the rule at report time from the stored probabilities.
+  # Primary 0.5 (2026-10-05): the a-priori rule of the first run (the class-weighted loss makes 0.5 the neutral
+  # point); val_youden, used from 2026-10-03, put the threshold far too low on the other laboratories and is
+  # reported beside it (docs/decision_log.md)
+  decision_threshold: 0.5
+  secondary_threshold: 'val_youden'  # a second rule reported in *_secondary columns; null = none
+  # Robustness methods (src/evaluation/robust.py), off by default; each acts on val and on every test cohort alike
+  # and is recorded in the prediction files (`robust`). Exploratory, chosen after the tests were read.
+  wise_alpha: null             # WiSE-FT backbone interpolation towards the timm weights: null | a in [0, 1] | val
+                               # (the a of 0.1 ... 1.0 with the best val ROC-AUC); the fine-tuned head is kept
+  stain_norm: 'none'           # none | reinhard: white-cell pixels Lab-matched to the training cells (randstainna_stats)
+  tent: false                  # TENT: entropy minimisation of the LayerNorm affine parameters on each unlabelled
+  tent_steps: 30               # cohort (episodic, val too); transductive, so its predictions are labelled `tent`
+  tent_lr: 1.0e-3              # and reported apart
+
+# Binary training (the `phase1` key and the phase1_ ids are kept so finished runs resume)
+phase1:
+  data_dir: 'data/processed'   # train (C-NMC) / val (LeukemiaAttri) / test_allidb2 / test_aria, built by `prepare`
+  class_names: ['Normal', 'ALL']
+  epochs: 30                   # at batch 128, val ROC-AUC peaks within ~5-15 epochs, then the model overfits
+  warmup_epochs: 5             # 0.2 + 0.8 (e + 1) / 5 of the peak, then cosine to a 2 % floor
+  base_lr: 4.0e-4              # peak (head) lr = base_lr * batch_size / 256 = 2e-4, the head lr of the earlier
+                               # batch-48 recipe; with layer decay the stem gets 5.1e-5, its old backbone lr.
+                               # Fixed a priori; it is the reference of the optional stage-1 screen
+                               # (`screen --lr`; Table 9's 2e-4 would give a head lr of 1e-4)
+  layer_decay: 0.9             # Table 9 layer-wise lr decay (A.3 sweeps 0.9 / 0.95 for transfer)
+  weight_decay: 0.05           # A.3 / A.4 downstream transfer (Table 9: 0.3 for Atto IN-1K fine-tuning)
+  selection_metric: 'roc_auc'  # checkpoint selection on val: roc_auc | macro_f1 (t = 0.5)
+  # Recipe knobs for `main.py tune` (scripts/experiments.py); the defaults keep the recipe above
+  label_smoothing: 0.0         # cross-entropy label smoothing (training loss only; val loss is never smoothed)
+  freeze_stages: 0             # stem + the first N of the 4 stages get no gradient (4 = linear probe of the head) ...
+  freeze_epochs: 0             # ... for the first N epochs, then train (LP-FT, Kumar et al. 2022); 0 = the whole run
+  probe_lr: 0.0                # > 0 (needs freeze_stages 4): constant lr of the frozen epochs (linear probe), the
+                               # schedule restarts after them; 0 = the frozen epochs are part of the schedule
+  train_fraction: 1.0          # < 1: a random subset of every (class, C-NMC fold) stratum, seeded by train_subset_seed
+  train_subset_seed: 0         # (the same subset for every arm and run seed); `tune --proxy` sets 0.3
+
+# `python main.py tune --proxy` (scripts/experiments.py): a local, cheaper ranking of the tuning candidates on the 4 GB laptop
+# GPU before the Colab grid; these values override the config for every proxy run. Effective batch 32 x 4 = 128, so
+# peak_lr (batch x accumulation) is the A100 one. Proxy numbers rank candidates; they are never reported as results.
+tune_proxy:
+  results_dir: 'results_proxy'
+  epochs: 15
+  phase1.train_fraction: 0.3
+  phase1.train_subset_seed: 0
+  batch_size: 32
+  grad_accum_steps: 4
+  num_workers: 2
+  eval_num_workers: 0
+  mixed_precision: 'bf16'

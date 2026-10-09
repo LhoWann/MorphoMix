@@ -1,0 +1,75 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Tool caches
+.cache/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Data: raw downloads and everything `main.py prepare` builds (ALL-IDB2 is not redistributable).
+# Only the split and group CSVs are tracked, for a leakage-free, reproducible bootstrap.
+data/raw/
+data/processed/*
+!data/processed/splits/
+
+# Results of every run (checkpoints, per-image predictions, tables, figures, logs), including older result folders
+results/
+results_*/
+
+# Archives (Colab code / data archives from colab/pack.py, Overleaf exports)
+*.zip
+*.tar
+*.tar.gz
+*.7z
+
+# Model weights anywhere
+*.pt
+*.pth
+*.onnx
+*.ckpt
+
+# Private or local-only material: manuscript drafts, supervision notes, coursework, agent scratch space
+paper/
+Bimbingan/
+kampus/
+agent_space/
+.claude/
+.agents/
+CLAUDE.md
+
+# LaTeX build artefacts
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.out
+*.synctex.gz
+*.toc
+
+# Logs and temporary files
+*.log
+*.tmp
+
+# Operating system and editors
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
