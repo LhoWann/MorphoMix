@@ -6,7 +6,6 @@
 
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.4%2B-ee4c2c)
-![timm](https://img.shields.io/badge/timm-ConvNeXt%20V2%20Atto-lightgrey)
 
 </div>
 
