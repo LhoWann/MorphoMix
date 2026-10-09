@@ -32,8 +32,8 @@ Atto backbone. Each laboratory has one role:
 | [Aria](https://doi.org/10.34740/KAGGLE/DSV/2175623) | test, whole fields |
 
 Folder layout and licences: [`data/README.md`](data/README.md). Do not use ALL-IDB1 (ALL-IDB2 is cropped from it),
-and do not redistribute ALL-IDB2 images. Changes made after the test cohorts were seen are recorded in
-[`docs/decision_log.md`](docs/decision_log.md).
+and do not redistribute ALL-IDB2 images. Changes made after the test cohorts were seen are disclosed in
+the paper.
 
 > Research code only; not a diagnostic device.
 
@@ -58,7 +58,6 @@ configs/         config.yaml
 scripts/         data, train, experiments, evaluate, foundation, audit, paper_stats, figures, run_all
 src/             augmentations, cam, datasets, training, evaluation, models, utils
 colab/           notebook, job runner, archive builder
-docs/            decision log
 ```
 
 ## Paper

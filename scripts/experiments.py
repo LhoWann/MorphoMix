@@ -61,7 +61,7 @@ ARMS: Dict[str, Dict] = {
     "k": {"desc": "stain_mixup, no auxiliary cells", "aug": "stain_mixup", "cfg": {"aux_train.enabled": False}},
 }
 ABLATION_TABLE = "tables/component_ablation"  # under results_dir
-# the composition was chosen with the test results known (docs/decision_log.md); the table is exploratory
+# the composition was chosen with the test results known (decision log); the table is exploratory
 VAL_COLUMNS = ["val_roc_auc", "val_macro_f1"]
 TEST_COLUMNS = [f"{k}_{m}" for k in TEST_SETS for m in ("roc_auc", "auprc", "macro_f1")]
 TABLE_COLUMNS = VAL_COLUMNS + TEST_COLUMNS
@@ -305,7 +305,7 @@ def screen_main(argv=None) -> int:
 
 TUNE_DOC = """Exploratory, test-guided tuning of the training recipe (`python main.py tune`).
 
-The test cohorts were unblinded on 2026-10-03 (docs/decision_log.md), so every number here is exploratory and is
+The test cohorts were unblinded on 2026-10-03 (decision log), so every number here is exploratory and is
 reported as such. A candidate is an arm plus config overrides. It is trained by `train.run_one` into
 {results_dir}/tuning as phase1_tune-<name>_seed<S>, selected on val like every run and scored on ALL-IDB2 and Aria by
 the same call (the configured test-time inference), then scored on the val cohort by `evaluate.screen_row` (selection
@@ -314,7 +314,7 @@ that helps only the tests stays visible. Nothing under tuning/ is read by `all`,
 
 `--grid final --adopt` (2026-10-06, the author's decision) tunes the final MorphoMix alone on the test cohorts, on
 MorphoMix-only knobs, and writes the candidate the pre-declared rule (`adopt`, ADOPT_MARGIN) picks into the config the
-`all` that follows trains; the baselines are not tuned (docs/decision_log.md, change 7).
+`all` that follows trains; the baselines are not tuned (decision log, change 7).
 
 `--proxy` ranks PROXY_GRID on the laptop first, with config `tune_proxy` on top of every candidate (a fixed 30 %
 class- and fold-stratified train subset, 15 epochs, batch 32 x 4 accumulation, its own results_dir); full val and
@@ -338,7 +338,7 @@ BEST = {**BASE, "ema_decay": 0.999, "phase1.label_smoothing": 0.1, "lowres_prob"
 BEST_NOEMA = {**BASE, "phase1.label_smoothing": 0.1, "lowres_prob": 0.5}
 # MorphoMix composition, pinned in every morpho_mix candidate (on top of TUNE_DEFAULTS). C2 (cell zoom) was removed
 # after the first cross-lab ablation; C2' (small cell) and C4 (multi-cell field) replace it (test-guided,
-# docs/decision_log.md). NOC2 is C1 + C3 alone (no cell-size component; the name is kept from the first grid)
+# decision log). NOC2 is C1 + C3 alone (no cell-size component; the name is kept from the first grid)
 NOC2 = {"small_cell_prob": 0.0, "field_prob": 0.0}
 C2P_C4 = {"small_cell_prob": 0.25, "field_prob": 0.25}
 # LP-FT (Kumar et al., ICLR 2022): 2 epochs of a linear probe (whole backbone frozen) at a constant head lr of 1e-3,
@@ -408,7 +408,7 @@ PROXY_EXTRA_GRID = ("hyb-c2p", "hyb-c2p-rsnonly", "ref-c2p-c4-lpft", "ref-c2p-c4
 PROXY_GRIDS = {"proxy": PROXY_GRID, "proxy-extra": PROXY_EXTRA_GRID}
 # 2026-10-06, the author's test-guided tuning of the final MorphoMix (C1 MLL23 + C2' + C3, the former arm e), on
 # Colab at the final recipe (30 epochs, batch 128) before the final run; only MorphoMix is tuned, the baselines are
-# not, so its test results are not evidence of generalisation (docs/decision_log.md). Pinned in every candidate:
+# not, so its test results are not evidence of generalisation (decision log). Pinned in every candidate:
 FINAL_E = {"appearance_prob": 0.5, "rsn_prob": 0.0, "acquisition_prob": 0.0, "aux_train.enabled": True}
 FINAL_CANDIDATES = {
     "e-ref": {},

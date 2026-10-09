@@ -40,7 +40,7 @@ randstainna_stats: 'data/processed/randstainna_stats.json'  # train-set template
 # stain_mixup: Macenko matrices of the MLL23 style bank (style_bank.path, key stain_matrix), intensity U[0.95, 1.05]
 
 # MorphoMix: one Azure-B cell mask (tau) drives C1, C2', C3 and C4 (execution order C1, C4 / C2', C3). Final
-# composition (2026-10-06, test-guided, docs/decision_log.md): C1 as the MLL23 bank transfer (appearance_prob)
+# composition (2026-10-06, test-guided, decision log): C1 as the MLL23 bank transfer (appearance_prob)
 # + C2' + C3, the former ablation arm e; the in-cell RandStainNA form (rsn_prob) is now ablation arm e, C4 is off
 morpho_threshold: 0.20       # tau
 # C1 stain transfer, no learned model: per sample a reference from the MLL23 style bank (`style_bank`) or, with
@@ -71,7 +71,7 @@ style_bank:
 # (`scripts/data.py:prepare_aux_cells`, `src/datasets/cells.py:smear_cell`) and added to the training set of every
 # arm. Both labels come from that laboratory and n_positive / n_negative follow C-NMC's class ratio (68 % ALL), so
 # the source carries no label; the RandStainNA fit stays on C-NMC. Ablation arm f turns it off. MLL23 myeloblasts vs
-# lymphocytes were tried first and rejected (docs/decision_log.md)
+# lymphocytes were tried first and rejected (decision log)
 aux_train:
   enabled: true
   dir: 'data/processed/train_aux_bodzas2023'
@@ -83,7 +83,7 @@ aux_train:
   colour_matched_dir: 'data/processed/train_aux_bodzas2023_cmatch'  # the same cells, cell pixels Reinhard-matched
                                # to the mean C-NMC template (prepare; control arm g: no slide-colour cue)
 # The former C2 (cell zoom ~ U[0.73, 1.27], p 0.66) was removed on 2026-10-03: removing it raised val, ALL-IDB2 and
-# Aria ROC-AUC in the first cross-lab ablation (test-guided, docs/decision_log.md). C2' and C4 replace it; both are
+# Aria ROC-AUC in the first cross-lab ablation (test-guided, decision log). C2' and C4 replace it; both are
 # aimed at Aria's whole fields (white cells ~27 px at 224, against ~100 px for a C-NMC cell; many cells per image) and
 # were chosen with the test results known. C4 is off in the final composition: in the local proxy (2 seeds) adding
 # it to C2' lowered val and Aria ROC-AUC; with C2' at 0.25, 3/4 of every batch keep the single-cell training format.
@@ -147,7 +147,7 @@ resources:
 tta_views: 8                 # dihedral views
 xai_stages: [-3, -2, -1]     # Layer-CAM reported at stages 2, 3 and 4, none picked
 # Test-time inference (src/evaluation/predict.py), used by every test scoring (`pretrain`, `all`, `tune`, `rescore`).
-# Exploratory: chosen after the test cohorts were read (docs/decision_log.md, 2026-10-03; aggregate and threshold
+# Exploratory: chosen after the test cohorts were read (decision log, 2026-10-03; aggregate and threshold
 # rule compared on the tests). The first cross-lab run used field: resize, decision_threshold: 0.5.
 inference:
   field: 'cells'               # whole-field cohorts: resize (field resized to img_size) | cells (cell by cell)
@@ -164,7 +164,7 @@ inference:
   # unlabelled test scores). Tables and stats resolve the rule at report time from the stored probabilities.
   # Primary 0.5 (2026-10-05): the a-priori rule of the first run (the class-weighted loss makes 0.5 the neutral
   # point); val_youden, used from 2026-10-03, put the threshold far too low on the other laboratories and is
-  # reported beside it (docs/decision_log.md)
+  # reported beside it (decision log)
   decision_threshold: 0.5
   secondary_threshold: 'val_youden'  # a second rule reported in *_secondary columns; null = none
   # Robustness methods (src/evaluation/robust.py), off by default; each acts on val and on every test cohort alike

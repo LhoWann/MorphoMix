@@ -1,5 +1,5 @@
 """Audits of the trained models and of the cohorts; every analysis is exploratory and post hoc (the test cohorts
-were unblinded during development, docs/decision_log.md).
+were unblinded during development, decision log).
 
 - `python main.py shortcut`: background-only reference, residual AUC, background swap and removal (section 1).
 - `python main.py leakaudit`: exact and perceptual duplicates between cohorts (section 2).
@@ -686,7 +686,7 @@ def field_audit_main(argv: Optional[List[str]] = None) -> int:
 # 4. Pre-specified replicate (LeukemiaAttri L_100X_C1)
 # --------------------------------------------------------------------------------------------------------------------
 # Pre-registered confirmatory cohort (`python main.py confirm`): LeukemiaAttri L_100X_C1, the selection cohort's
-# laboratory imaged with its low-cost microscope, scored once by every stored checkpoint (docs/decision_log.md,
+# laboratory imaged with its low-cost microscope, scored once by every stored checkpoint (decision log,
 # entry of 2026-10-07). It likely shares slides with the selection cohort, so it is an acquisition-shift replicate,
 # not a new population.
 #
