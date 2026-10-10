@@ -264,7 +264,7 @@ def generate_augmentation_figures(
         (C_INPUT, "Training cells", "C-NMC and auxiliary Bodzas cells", [
             (np_a, next(letters), f"C-NMC {class_names[0]}"),
             (np_b, next(letters), f"C-NMC {class_names[1]}"),
-            *[(img, next(letters), f"Bodzas {c} (aux.)") for img, c in aux_cells],
+            *[(img, next(letters), f"Bodzas {c} (auxiliary)") for img, c in aux_cells],
         ], False),
         (C_BASE, "Baselines", "applied to cell (b)", [
             (np_basic, next(letters), "Basic"),
@@ -274,9 +274,9 @@ def generate_augmentation_figures(
         ], True),
         (C_OURS, "MorphoMix", "applied to cell (b), one Azure-B cell mask", [
             (np_c1, next(letters), "$C_1$ in-cell stain"),
-            (np_c12, next(letters), "$C_1 + C_2'$ small, before $C_3$"),
-            (np_c12_low, next(letters), "$C_1 + C_2'$ low detail"),
-            (np_c123, next(letters), "$C_1 + C_2' + C_3$"),
+            (np_c12, next(letters), "$C_1 + C_2$ small, before $C_3$"),
+            (np_c12_low, next(letters), "$C_1 + C_2$ low detail"),
+            (np_c123, next(letters), "$C_1 + C_2 + C_3$"),
         ], True),
     ]
 
@@ -359,12 +359,12 @@ def generate_augmentation_figures(
         ]),
         (C_BASE, "Stage 2 - components", [
             (np_c1, "(d)", "$C_1$ stain"),
-            (np_c12, "(e)", "$C_2'$ small cell"),
+            (np_c12, "(e)", "$C_2$ small cell"),
             (np_synth_bg, "(f)", "$C_3$ context"),
             (np_rsn, "(g)", "RandStainNA $C_1$ (arm e)"),
         ]),
         (C_OURS, "Stage 3 - network input", [
-            (np_c123, "(h)", "$C_1 + C_2' + C_3$"),
+            (np_c123, "(h)", "$C_1 + C_2 + C_3$"),
             (np.stack([np_mask_final] * 3, axis=-1), "(i)", "Mask of (h)"),
         ]),
     ], "MorphoMix pipeline: one mask, reused by every component", [
@@ -374,7 +374,7 @@ def generate_augmentation_figures(
         "(d) nucleus and cytoplasm matched in Lab to a random MLL23 cell (or a virtual template). "
         "(e) the cell shrunk to field scale (24-48 px) at a random position. (f) procedural plasma and "
         "erythrocytes; no real image is ever pasted in. (g) the RandStainNA form of C1 (ablation arm e): the cell "
-        "recoloured with a template fitted to the training cells. (i) the mask after C2', which C3 never changes.",
+        "recoloured with a template fitted to the training cells. (i) the mask after C2, which C3 never changes.",
     ], pipeline_path)
 
     print(f"[OK] Augmentation figures written to: {output_dir}")
@@ -537,11 +537,11 @@ def fig_overview(cfg: Dict, out: str) -> Optional[str]:
         (mask_view(cell, tau), "cell mask $M$", f"prior $\\geq \\tau = {tau:.2f}$", "#7A7A7A"),
         (aug["07_morphomix_c1_stain"], "$C_1$ in-cell stain",
          f"nucleus, cytoplasm\nto an MLL23 cell\np = {cfg['appearance_prob']}", figstyle.COLOURS["orange"]),
-        (aug["08_morphomix_c1_c2p_small_cell"], "$C_2'$ small cell",
+        (aug["08_morphomix_c1_c2p_small_cell"], "$C_2$ small cell",
          f"to {cfg['small_cell_px'][0]}-{cfg['small_cell_px'][1]} px,\nor low detail\np = {cfg['small_cell_prob']}",
          figstyle.COLOURS["orange"]),
         (aug["10_morphomix_c1_c2p_c3"], "$C_3$ background",
-         f"synthetic smear\noutside $M$\np = {cfg['background_prob']:.2f}", figstyle.COLOURS["orange"]),
+         f"synthetic smear\noutside $M$\np = {cfg['background_prob']:.3f}", figstyle.COLOURS["orange"]),
     ]
     side, step_gap = 0.76, 0.20
     model_w = W - 2 * margin - len(steps) * side - len(steps) * step_gap
@@ -549,7 +549,7 @@ def fig_overview(cfg: Dict, out: str) -> Optional[str]:
     x_ours = margin + 3 * (side + step_gap) - 0.07
     c.box(x_ours, y_img - 0.64, 3 * side + 2 * step_gap + 0.14, side + 0.92, FILL["ours"],
           ec=figstyle.COLOURS["paleorange"], lw=0.8)
-    c.text(x_ours + 0.07, y_img + side + 0.15, "MorphoMix components (GPU batch, label unchanged)", size=6.3,
+    c.text(x_ours + 0.07, y_img + side + 0.15, "MorphoMix components (label unchanged)", size=6.3,
            weight="bold", colour=figstyle.COLOURS["darkorange"], ha="left")
     for i, (img, name, note, edge) in enumerate(steps):
         x = margin + i * (side + step_gap)
@@ -615,7 +615,7 @@ def fig_overview(cfg: Dict, out: str) -> Optional[str]:
     dec_w = W - margin - x_d
     c.box(x_d, y_row + 0.30, dec_w, side_c - 0.60, FILL["test"], ec=ROLE["test"], lw=0.7)
     label = cfg["phase1"]["class_names"][int(field_p >= 0.5)]
-    c.text(x_d + dec_w / 2, y_row + side_c / 2 + 0.12, f"field label: {label}", size=6.6, weight="bold")
+    c.text(x_d + dec_w / 2, y_row + side_c / 2 + 0.12, f"predicted label: {label}", size=6.6, weight="bold")
     c.text(x_d + dec_w / 2, y_row + side_c / 2 - 0.08, "ALL iff p(ALL) $\\geq$ 0.5", size=6.2, colour=MUTED)
     return figstyle.finish(c.fig, out)[0]
 
@@ -647,7 +647,7 @@ def example_field(cfg: Dict, n_cells: int = 4) -> tuple:
 
 COHORTS = [("val", "LeukemiaAttri (selection)"), ("allidb2", "ALL-IDB2 (single cells)"),
            ("aria", "Aria (whole fields)")]
-ABLATION = {"b": "no $C_1$ (in-cell stain)", "c": "no $C_2'$ (small cell)", "d": "no $C_3$ (background)",
+ABLATION = {"b": "no $C_1$ (in-cell stain)", "c": "no $C_2$ (small cell)", "d": "no $C_3$ (background)",
             "e": "$C_1$ as RandStainNA"}  # arm f (no auxiliary cells) is in fig_aux
 
 
@@ -1046,14 +1046,12 @@ def mean_auc(runs: List[Dict], arm: str, cohort: str) -> List[float]:
 
 def fig_graphical_abstract(cfg: Dict, out: str) -> Optional[str]:
     """Elsevier graphical abstract (13.28 x 5.31 in at 300 dpi, readable at 5 x 13 cm): the cross-laboratory design,
-    MorphoMix on one cell, and the external-test ROC-AUC of MorphoMix, the best other augmentation per cohort, the
-    DinoBloom-S probe and the background-only reference (seed means, +/- sd)."""
-    aug_dir = abs_path(os.path.join(cfg["results_dir"], "figures", "augmentations"))
-    stages = ["02_input_all", "07_morphomix_c1_stain", "08_morphomix_c1_c2p_small_cell", "10_morphomix_c1_c2p_c3"]
+    the background-only reference on every cohort, and every method on the two background-neutral cohorts (seed
+    means, +/- sd; no method highlighted)."""
     runs, bg = table(cfg, "extended_metrics_runs.json"), table(cfg, "shortcut_background_only_auc.json")
-    if runs is None or bg is None or not all(os.path.exists(os.path.join(aug_dir, f"{s}.png")) for s in stages):
+    rep, rep_bg = table(cfg, "confirm_l100x_runs.csv"), table(cfg, "confirm_l100x_background.json")
+    if runs is None or bg is None or rep is None or rep_bg is None:
         return None
-    aug = {s: rgb(os.path.join(aug_dir, f"{s}.png")) for s in stages}
     W, H = 13.28, 5.31
     c = Canvas(W, H)
     title_y = H - 0.42
@@ -1061,7 +1059,7 @@ def fig_graphical_abstract(cfg: Dict, out: str) -> Optional[str]:
     # (a) one laboratory per role
     c.box(0.12, 0.12, 4.02, H - 0.24, "#F6F6F6")
     c.text(0.36, title_y, "Cross-laboratory design", size=19, weight="bold", ha="left")
-    design = [("train", "Train", [("cnmc", "C-NMC", "cells"), ("bodzas", "Bodzas", "aux. cells")]),
+    design = [("train", "Train", [("cnmc", "C-NMC", "cells"), ("bodzas", "Bodzas", "auxiliary")]),
               ("select", "Select", [("leukemiaattri", "LeukemiaAttri", "cells")]),
               ("test", "Test", [("allidb2", "ALL-IDB2", "cells"), ("aria", "Aria", "whole fields")])]
     side, pitch = 0.92, 1.30
@@ -1077,74 +1075,64 @@ def fig_graphical_abstract(cfg: Dict, out: str) -> Optional[str]:
             c.text(x + side / 2, y - 0.03, name, size=15, weight="bold", va="top")
             c.text(x + side / 2, y - 0.27, kind, size=13, colour=MUTED, va="top")
 
-    # (b) MorphoMix on one training cell: one mask, then C1 -> C2' -> C3, label unchanged
-    x0, w = 4.30, 4.66
-    c.box(x0, 0.12, w, H - 0.24, FILL["ours"], ec=figstyle.COLOURS["paleorange"], lw=1.2)
-    c.text(x0 + 0.24, title_y, "MorphoMix", size=19, weight="bold", colour=figstyle.COLOURS["darkorange"], ha="left")
-    tau = float(cfg["morpho_threshold"])
-    top_side, y_top = 1.05, title_y - 0.40 - 1.05
-    top = [(aug["02_input_all"], "training cell"), (mask_view(aug["02_input_all"], tau), "cell mask")]
-    for k, (img, name) in enumerate(top):
-        x = x0 + 0.85 + k * (top_side + 0.95)
-        c.image(img, x, y_top, top_side, edge=ROLE["train"], lw=1.4)
-        c.text(x + top_side / 2, y_top - 0.04, name, size=15, va="top")
-        if k == 0:
-            y_mid = y_top + top_side / 2
-            c.arrow(x + top_side + 0.10, y_mid, x + top_side + 0.85, y_mid, lw=2.0, head=18)
-    bot_side, gap = 1.22, 0.30
-    y_bot = 0.70
-    bottom = [(aug["07_morphomix_c1_stain"], "$C_1$", "stain"),
-              (aug["08_morphomix_c1_c2p_small_cell"], "$C_2'$", "small cell"),
-              (aug["10_morphomix_c1_c2p_c3"], "$C_3$", "background")]
-    x_bot = x0 + (w - 3 * bot_side - 2 * gap) / 2
-    x_mask = x0 + 0.85 + top_side + 0.95 + top_side / 2
-    c.arrow(x_mask, y_top - 0.40, x_bot + bot_side / 2 + 0.25, y_bot + bot_side + 0.10, lw=2.0, head=18)
-    for k, (img, badge, name) in enumerate(bottom):
-        x = x_bot + k * (bot_side + gap)
-        c.image(img, x, y_bot, bot_side, edge=figstyle.COLOURS["orange"], lw=1.8)
-        c.text(x + 0.07, y_bot + bot_side - 0.07, badge, size=15, weight="bold", colour="white", ha="left", va="top",
-               bbox=dict(boxstyle="round,pad=0.18", fc=figstyle.COLOURS["darkorange"], ec="none"))
-        c.text(x + bot_side / 2, y_bot - 0.04, name, size=15, va="top")
-        if k:
-            c.arrow(x - gap + 0.05, y_bot + bot_side / 2, x - 0.05, y_bot + bot_side / 2, lw=2.0, head=18)
+    # (b) the background-only reference: grouped cross-validated ROC-AUC of background statistics within each cohort
+    x0, w = 4.30, 4.30
+    c.box(x0, 0.12, w, H - 0.24, "#F6F6F6")
+    c.text(x0 + 0.24, title_y, "Background alone", size=19, weight="bold", ha="left")
+    c.text(x0 + 0.24, title_y - 0.42, "predicts the test labels", size=16, ha="left", colour=MUTED)
+    cohorts = [("Selection", bg["val"], "select"), ("Replicate", rep_bg["background_only_roc_auc"], "select"),
+               ("ALL-IDB2", bg["allidb2"], "test"), ("Aria", bg["aria"], "test")]
+    ax_x, ax_w, y_ax, h_ax = x0 + 1.55, 2.20, 0.75, 3.30
+    ax = c.fig.add_axes([ax_x / W, y_ax / H, ax_w / W, h_ax / H])
+    for i, (name, value, role) in enumerate(cohorts):
+        ax.barh(i, value, height=0.58, color=ROLE[role], alpha=0.85, zorder=3)
+        ax.text(-0.05, i, name, fontsize=15, ha="right", va="center", fontweight="bold", color=ROLE[role])
+        ax.text(value + 0.035, i, f"{value:.2f}", fontsize=15, ha="left", va="center", color=ROLE[role], zorder=6,
+                bbox=dict(boxstyle="square,pad=0.1", fc="#F6F6F6", ec="none"))
+    ax.axvline(0.5, color=MUTED, linewidth=1.4, linestyle="--", zorder=4)
+    ax.text(0.5, -0.75, "chance", fontsize=12, color=MUTED, ha="center", va="bottom")
+    ax.set_ylim(len(cohorts) - 0.5, -0.9)
+    ax.set_yticks([])
+    ax.set_xlim(0.0, 1.0)
+    ax.set_xticks([0, 0.5, 1.0])
+    ax.tick_params(labelsize=12, length=3)
+    ax.set_xlabel("ROC-AUC", fontsize=13)
+    ax.patch.set_alpha(0)
+    for s in ("top", "right", "left"):
+        ax.spines[s].set_visible(False)
 
-    # (c) external-test ROC-AUC, seed mean +/- sd: MorphoMix does not win on ALL-IDB2
-    x0c = 9.12
+    # (c) every method on the two background-neutral cohorts, seed mean +/- sd, none highlighted
+    x0c = 8.76
     c.box(x0c, 0.12, W - 0.12 - x0c, H - 0.24, "#F6F6F6")
-    c.text(x0c + 0.24, title_y, "External test ROC-AUC", size=19, weight="bold", ha="left")
-    others = [a for a in cfg["augmentations"] if a != "morpho_mix"]
-    ax_x, ax_w = 11.02, 1.58
-    for k, (key, title) in enumerate([("allidb2", "ALL-IDB2"), ("aria", "Aria")]):
-        best = max(others, key=lambda a: np.mean(mean_auc(runs, a, key)))
-        rows = [("morpho_mix", mean_auc(runs, "morpho_mix", key)), (best, mean_auc(runs, best, key)),
-                ("dinobloom_s", mean_auc(runs, "dinobloom_s", key)), ("bg", [bg[key]])]
-        y_ax, h_ax = 2.80 - k * 2.12, 1.58
+    c.text(x0c + 0.24, title_y, "Background-neutral cohorts", size=18, weight="bold", ha="left")
+    c.text(x0c + 0.24, title_y - 0.42, "MorphoMix vs each comparator: n.s.", size=15, ha="left", colour=MUTED)
+    c.text(x0c + 0.24, title_y - 0.72, "primary analysis; mean $\\pm$ sd over seeds", size=12, ha="left", colour=MUTED)
+    arms = list(cfg["augmentations"]) + ["dinobloom_s"]
+    sel = {a: mean_auc(runs, a, "val") for a in arms}
+    rep_auc = {a: rep.loc[rep["arm"] == a, "roc_auc"].tolist() for a in arms}
+    ax_x, ax_w = 10.90, 1.70
+    for k, (title, values) in enumerate([("Selection", sel), ("Replicate", rep_auc)]):
+        y_ax, h_ax = 2.48 - k * 2.08, 1.62
         ax = c.fig.add_axes([ax_x / W, y_ax / H, ax_w / W, h_ax / H])
-        for i, (arm, values) in enumerate(rows):
-            v = np.asarray(values, dtype=float)
-            ref = arm == "bg"
-            colour = BG_REF if ref else figstyle.ARM_COLOUR[arm]
-            ax.errorbar(v.mean(), i, xerr=v.std(ddof=1) if len(v) > 1 else 0, fmt="D" if ref else "o",
-                        ms=11 if arm == "morpho_mix" else 9.5, color=colour, mfc="white" if ref else colour, mew=2.0,
-                        elinewidth=2.4, capsize=0, zorder=4)
-            name = "Background only" if ref else figstyle.ARM_LABEL[arm].replace(" probe", "")
-            y_row = y_ax + h_ax * (len(rows) - 0.5 - i) / len(rows)
-            bold = "bold" if arm == "morpho_mix" else "normal"
-            c.text(ax_x - 0.12, y_row, name, size=14, ha="right", weight=bold, colour=MUTED if ref else INK)
-            c.text(ax_x + ax_w + 0.10, y_row, f"{v.mean():.2f}", size=14, ha="left", weight=bold, colour=colour)
-        ax.axhline(2.5, color="#C8C8C8", linewidth=1.0)
-        ax.set_ylim(len(rows) - 0.5, -0.5)
+        for i, arm in enumerate(arms):
+            v = np.asarray(values[arm], dtype=float)
+            colour = figstyle.ARM_COLOUR[arm]
+            ax.errorbar(v.mean(), i, xerr=v.std(ddof=1) if len(v) > 1 else 0, fmt="o", ms=8, color=colour,
+                        elinewidth=2.2, capsize=0, zorder=4)
+            y_row = y_ax + h_ax * (len(arms) - 0.5 - i) / len(arms)
+            c.text(ax_x - 0.12, y_row, figstyle.ARM_LABEL[arm].replace(" probe", ""), size=12.5, ha="right")
+        ax.set_ylim(len(arms) - 0.5, -0.5)
         ax.set_yticks([])
-        ax.set_xlim(0.70, 1.0)
-        ax.set_xticks([0.7, 0.8, 0.9, 1.0])
+        ax.set_xlim(0.60, 0.85)
+        ax.set_xticks([0.6, 0.7, 0.8])
         ax.tick_params(labelsize=12, labelbottom=bool(k), length=3)
         ax.grid(axis="x", color="#DCDCDC", linewidth=0.8)
         ax.set_axisbelow(True)
         ax.patch.set_alpha(0)
         for s in ("top", "right", "left"):
             ax.spines[s].set_visible(False)
-        c.text(x0c + 0.24, y_ax + h_ax + 0.16, title, size=16, weight="bold", ha="left",
-               colour=ROLE["test"])
+        c.text(ax_x + ax_w + 0.10, y_ax + h_ax / 2, title, size=14, weight="bold", ha="left", rotation=90,
+               colour=ROLE["select"])
     with plt.rc_context({"savefig.bbox": "standard"}):  # the exact Elsevier size, not a tight crop
         return figstyle.finish(c.fig, out)[0]
 
