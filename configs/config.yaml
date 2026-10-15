@@ -202,7 +202,7 @@ phase1:
 # GPU before the Colab grid; these values override the config for every proxy run. Effective batch 32 x 4 = 128, so
 # peak_lr (batch x accumulation) is the A100 one. Proxy numbers rank candidates; they are never reported as results.
 tune_proxy:
-  results_dir: 'results_proxy'
+  results_dir: 'results/proxy'
   epochs: 15
   phase1.train_fraction: 0.3
   phase1.train_subset_seed: 0

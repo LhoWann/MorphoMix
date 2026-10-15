@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from src.utils.config import load_config  # noqa: E402
 
-CODE_SKIP = {".venv", "data", "agent_space", ".claude", ".agents", ".git", "paper", "kampus", "Bimbingan",
+CODE_SKIP = {".venv", "data", "agent_space", ".claude", ".agents", ".git", "writing", "archive",
              "__pycache__", ".ruff_cache"}
 COHORTS = ("train", "val", "test_allidb2", "test_aria")  # scripts/train.py: TRAIN_DIR / VAL_DIR / TEST_SETS
 STORED = {".png", ".jpg", ".jpeg"}  # already compressed

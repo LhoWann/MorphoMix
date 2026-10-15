@@ -6,8 +6,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-WIDTH_SINGLE = 3.35  # inches, one journal column
-WIDTH_DOUBLE = 6.90
+WIDTH_SINGLE = 3.60  # inches; ISWA minimum at 300 dpi: 1063 px single column, 2244 px full page
+WIDTH_DOUBLE = 7.60
 
 # tableau-colorblind10, named
 COLOURS = {

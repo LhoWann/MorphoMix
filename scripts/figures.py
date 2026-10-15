@@ -415,6 +415,7 @@ FOUNDATION_ARMS = ("dinobloom_s", "dinobloom_b")  # scripts/foundation.py MODELS
 BG_REF = "#B03A2E"
 
 INK = "#1A1A1A"
+FIG_FONT_SCALE = 1.15  # the diagram figures are drawn on 7.6 in and shown at about 6.3 in
 MUTED = "#555555"
 ROLE = {"train": "#3B3B3B", "select": figstyle.COLOURS["blue"], "test": figstyle.COLOURS["darkorange"],
         "ref": figstyle.COLOURS["lightgrey"]}
@@ -436,7 +437,9 @@ def rgb(path: str, side: int = 224) -> np.ndarray:
 class Canvas:
     """One full-figure axes in inch coordinates (origin bottom-left), for diagram-style figures."""
 
-    def __init__(self, width: float, height: float):
+    def __init__(self, width: float, height: float,
+                 font_scale: float = 1.0):
+        self.font_scale = font_scale
         self.fig = plt.figure(figsize=(width, height))
         self.ax = self.fig.add_axes([0, 0, 1, 1])
         self.ax.set_xlim(0, width)
@@ -454,12 +457,13 @@ class Canvas:
 
     def text(self, x: float, y: float, s: str, size: float = 7.0, colour: str = INK, weight: str = "normal",
              ha: str = "center", va: str = "center", **kw):
-        self.ax.text(x, y, s, fontsize=size, color=colour, fontweight=weight, ha=ha, va=va, zorder=4, **kw)
+        self.ax.text(x, y, s, fontsize=size * self.font_scale, color=colour, fontweight=weight, ha=ha, va=va,
+                     zorder=4, **kw)
 
     def arrow(self, x0: float, y0: float, x1: float, y1: float, colour: str = "#7A7A7A", lw: float = 1.0,
-              head: float = 8):
+              head: float = 8, ls="-"):
         self.ax.add_patch(FancyArrowPatch((x0, y0), (x1, y1), arrowstyle="-|>", mutation_scale=head, lw=lw,
-                                          color=colour, shrinkA=0, shrinkB=0, zorder=4))
+                                          color=colour, shrinkA=0, shrinkB=0, zorder=4, linestyle=ls))
 
     def panel_title(self, x: float, y: float, letter: str, title: str):
         self.text(x, y, f"({letter})", size=8.5, weight="bold", ha="left", va="bottom")
@@ -479,94 +483,433 @@ def mask_view(img: np.ndarray, threshold: float) -> np.ndarray:
     return out
 
 
-def fig_overview(cfg: Dict, out: str) -> Optional[str]:
-    """Study design (one laboratory per role), the MorphoMix training pipeline and the cell-by-cell field
-    inference, with real images from every cohort."""
-    aug_dir = abs_path(os.path.join(cfg["results_dir"], "figures", "augmentations"))
-    stages = ["02_input_all", "07_morphomix_c1_stain", "08_morphomix_c1_c2p_small_cell", "10_morphomix_c1_c2p_c3"]
-    if not all(os.path.exists(os.path.join(aug_dir, f"{s}.png")) for s in stages):
-        print("  run `python main.py figures` first (augmentation panels)")
-        return None
-    aug = {s: rgb(os.path.join(aug_dir, f"{s}.png")) for s in stages}
-    counts = {k: len(glob.glob(abs_path(f"data/processed/{d}/*/*.png")))
-              for k, d in [("cnmc", "train"), ("bodzas", "train_aux_bodzas2023"), ("leukemiaattri", "val"),
-                           ("allidb2", "test_allidb2"), ("aria", "test_aria")]}
+def crop_to_cell(img: np.ndarray, cell: np.ndarray, margin: int = 10) -> tuple:
+    """Square crop window (r0, c0, half) around the cell mask, so a mostly black C-NMC crop shows the cell large."""
+    rows, cols = np.nonzero(cell)
+    half = min(int(max(np.ptp(rows), np.ptp(cols)) / 2) + margin, img.shape[0] // 2)
+    r0 = int(np.clip((rows.min() + rows.max()) // 2 - half, 0, img.shape[0] - 2 * half))
+    c0 = int(np.clip((cols.min() + cols.max()) // 2 - half, 0, img.shape[1] - 2 * half))
+    return r0, c0, half
 
-    W, H = figstyle.WIDTH_DOUBLE, 6.55
-    c = Canvas(W, H)
 
-    # (a) study design: one laboratory per role
-    top = H - 0.12
-    c.panel_title(0.05, top - 0.2, "a", "Study design")
-    cards = [
-        ("train", "C-NMC 2019", "AIIMS New Delhi", f"{counts['cnmc']:,} single cells", "cnmc"),
-        ("train", "Bodzas 2023", "Ostrava (auxiliary)", f"{counts['bodzas']:,} single cells", "bodzas"),
-        ("ref", "MLL23", "Munich", "stain statistics only", "mll23"),
-        ("select", "LeukemiaAttri", "Lahore", f"{counts['leukemiaattri']:,} cell crops", "leukemiaattri"),
-        ("test", "ALL-IDB2", "Milan", f"{counts['allidb2']:,} single cells", "allidb2"),
-        ("test", "Aria", "Tehran", f"{counts['aria']:,} whole fields", "aria"),
+def region_map(img: np.ndarray, cell: np.ndarray) -> np.ndarray:
+    """The cell with its Otsu nucleus / cytoplasm split painted (nucleus purple, cytoplasm cyan), as C1 sees it."""
+    from src.augmentations.stain import split_nucleus
+    x = torch.from_numpy(img.copy()).permute(2, 0, 1)[None].float() / 255
+    nucleus = split_nucleus(x, torch.from_numpy(cell.astype(np.float32))[None, None])[0, 0].numpy()
+    out = np.zeros_like(img)
+    out[cell & ~nucleus] = CYTOPLASM
+    out[nucleus] = NUCLEUS
+    return out
+
+
+def c1_references(bank: StyleBank, n: int = 4) -> List[int]:
+    """Bank rows nearest both tails of the first two principal axes of the nucleus / cytoplasm Lab means."""
+    means = bank.mean.flatten(1).double()
+    scores = (means - means.mean(dim=0)) @ torch.linalg.svd(means - means.mean(dim=0), full_matrices=False)[2][:2].T
+    lo, hi = (torch.quantile(scores, q / 100, dim=0) for q in (C1_REF_PERCENTILE, 100 - C1_REF_PERCENTILE))
+    targets = [(lo[0], 0.0), (hi[0], 0.0), (0.0, lo[1]), (0.0, hi[1])][:n]
+    return [int((scores - torch.tensor(t, dtype=scores.dtype)).norm(dim=1).argmin()) for t in targets]
+
+
+def swatch_colours(bank: StyleBank, rows: List[int]) -> np.ndarray:
+    """sRGB [n, 2, 3] of the nucleus and cytoplasm Lab means of bank rows."""
+    from src.augmentations.stain import lab_to_rgb
+    return lab_to_rgb(bank.mean[rows].permute(0, 2, 1)[..., None]).squeeze(-1).permute(0, 2, 1).numpy()
+
+
+def draw_swatch(c: "Canvas", x: float, y: float, colours: np.ndarray, size: float = 0.34):
+    """Rounded cytoplasm tile with a nucleus disc: the mean colours stored for one cell."""
+    c.ax.add_patch(FancyBboxPatch((x - size / 2, y - size / 2), size, size, boxstyle="round,pad=0,rounding_size=0.07",
+                                  fc=colours[1], ec="#9A9A9A", lw=0.5, zorder=3))
+    c.ax.add_patch(plt.Circle((x, y), size * 0.32, fc=colours[0], ec="none", zorder=4))
+
+
+def stack(c: "Canvas", img: np.ndarray, x: float, y: float, side: float, edge: str, n: int = 3, step: float = 0.045):
+    """Layered copies of one image: a batch, in the manner of a network diagram."""
+    for k in reversed(range(n)):
+        c.image(img, x + k * step, y + k * step, side, edge=edge if k == 0 else "#BBBBBB", lw=1.0 if k == 0 else 0.5)
+
+
+def study_cards(cfg: Dict) -> Dict[str, tuple]:
+    """(image, name, laboratory, size and form) of every cohort, for the study-design figure."""
+    n = {k: len(glob.glob(abs_path(f"data/processed/{d}/*/*.png")))
+         for k, d in [("cnmc", "train"), ("bodzas", "train_aux_bodzas2023"), ("leukemiaattri", "val"),
+                      ("allidb2", "test_allidb2"), ("aria", "test_aria")]}
+    field = f"data/processed/test_aria/ALL/{example_field(cfg)[0]}"
+    return {
+        "cnmc": (rgb(EXAMPLES["cnmc"]), "C-NMC 2019", "AIIMS New Delhi", f"{n['cnmc']:,} single cells\non black"),
+        "bodzas": (rgb(EXAMPLES["bodzas"]), "Bodzas 2023", "Ostrava", f"{n['bodzas']:,} cells,\ncut onto black"),
+        "mll23": (rgb(EXAMPLES["mll23"]), "MLL23", "Munich", "41,621 single cells"),
+        "leukemiaattri": (rgb(EXAMPLES["leukemiaattri"]), "LeukemiaAttri", "Lahore",
+                          f"{n['leukemiaattri']:,} cell crops"),
+        "allidb2": (rgb(EXAMPLES["allidb2"]), "ALL-IDB2", "Milan", f"{n['allidb2']:,} single cells"),
+        "aria": (rgb(field), "Aria", "Tehran", f"{n['aria']:,} whole fields"),
+    }
+
+
+def fig_study_design(cfg: Dict, out: str) -> Optional[str]:
+    """Which laboratory's data is used for what: stain statistics, training, checkpoint selection and testing."""
+    cards = study_cards(cfg)
+    orange, dark = figstyle.COLOURS["orange"], figstyle.COLOURS["darkorange"]
+    rows = [
+        ("ref", "Stain statistics", ["mll23"],
+         ["Only the Lab mean and sd of the nucleus and of the",
+          "cytoplasm of each cell are stored (the style bank,",
+          "41,146 cells kept). No MLL23 image and no MLL23",
+          "label reaches the classifier. The bank gives target",
+          "colours to C1 and to the Stain Mix-up baseline."]),
+        ("train", "Training", ["cnmc", "bodzas"],
+         ["Images and labels train the classifier",
+          "(Normal vs ALL). Every training image is augmented",
+          "on the GPU; MorphoMix recolours, shrinks or",
+          "re-backgrounds these images only. Bodzas cells are",
+          "cut onto black like C-NMC and add a second laboratory."]),
+        ("select", "Selection", ["leukemiaattri"],
+         ["Crops are scored after every epoch; the epoch",
+          "with the best image-level ROC-AUC is kept.",
+          "Never used for training."]),
+        ("test", "External testing", ["allidb2", "aria"],
+         ["The kept checkpoint scores each cohort once.",
+          "ALL-IDB2: one cell per image. Aria: every white",
+          "cell of a field is scored and the scores are",
+          "averaged. Never used for training, recolouring",
+          "or selection."]),
     ]
-    groups = [("train", "Training", 0, 2), ("ref", "Stain references", 2, 3), ("select", "Model selection", 3, 4),
-              ("test", "External testing", 4, 6)]
-    margin, gap = 0.08, 0.07
-    card_w = (W - 2 * margin - gap * (len(cards) - 1)) / len(cards)
-    card_h, img_side = 1.62, 0.84
-    y_card = top - 0.48 - card_h
-    for role, label, i0, i1 in groups:
-        x0 = margin + i0 * (card_w + gap)
-        x1 = margin + i1 * (card_w + gap) - gap
-        c.ax.plot([x0, x1], [y_card + card_h + 0.08] * 2, color=ROLE[role], lw=2.2, solid_capstyle="butt")
-        c.text((x0 + x1) / 2, y_card + card_h + 0.17, label, size=7.5, weight="bold", colour=ROLE[role])
-    for i, (role, name, place, n, key) in enumerate(cards):
-        x = margin + i * (card_w + gap)
-        c.box(x, y_card, card_w, card_h, FILL[role])
-        img = rgb(f"data/processed/test_aria/ALL/{example_field(cfg)[0]}" if key == "aria" else EXAMPLES[key])
-        c.image(img, x + (card_w - img_side) / 2, y_card + card_h - img_side - 0.08, img_side)
-        c.text(x + card_w / 2, y_card + 0.50, name, size=7.2, weight="bold")
-        c.text(x + card_w / 2, y_card + 0.32, place, size=6.4, colour=MUTED)
-        c.text(x + card_w / 2, y_card + 0.15, n, size=6.4, colour=MUTED)
+    row_h, gap, side, card_w = 1.16, 0.34, 0.76, 1.92
+    W, H = figstyle.WIDTH_DOUBLE, 0.10 + len(rows) * row_h + (len(rows) - 1) * gap + 0.10
+    c = Canvas(W, H, font_scale=FIG_FONT_SCALE)
+    x_cards, x_text, x_arrow = 0.62, 4.52, 0.62 + side / 2
+    ys = [H - 0.10 - (i + 1) * row_h - i * gap for i in range(len(rows))]
+    for (role, label, keys, lines), y in zip(rows, ys):
+        c.box(0.06, y, W - 0.12, row_h, FILL[role])
+        c.ax.plot([0.13, 0.13], [y + 0.12, y + row_h - 0.12], color=ROLE[role], lw=3, solid_capstyle="butt")
+        c.text(0.32, y + row_h / 2, label, size=6.8, weight="bold", colour=ROLE[role], rotation=90)
+        for k, key in enumerate(keys):
+            img, name, lab, size = cards[key]
+            x = x_cards + k * card_w
+            c.image(img, x, y + (row_h - side) / 2, side, edge=ROLE[role], lw=1.3)
+            c.text(x + side + 0.07, y + row_h / 2 + 0.24, name, size=6.8, weight="bold", ha="left")
+            c.text(x + side + 0.07, y + row_h / 2 + 0.05, lab, size=6.1, colour=MUTED, ha="left")
+            c.text(x + side + 0.07, y + row_h / 2 - 0.15, size, size=6.0, colour=MUTED, ha="left", va="top",
+                   linespacing=1.15)
+        c.text(x_text, y + row_h / 2, "\n".join(lines), size=6.1, ha="left", linespacing=1.4)
+    notes = [(orange, (0, (3, 2)), "colour statistics only (dashed)", dark),
+             (ROLE["train"], "-", "trained model", MUTED),
+             (ROLE["select"], "-", "selected checkpoint", MUTED)]
+    for i, (colour, style, text, tcolour) in enumerate(notes):
+        c.arrow(x_arrow, ys[i] - 0.02, x_arrow, ys[i + 1] + row_h + 0.02, colour=colour, lw=1.4, head=9, ls=style)
+        c.text(x_arrow + 0.12, ys[i] - gap / 2, text, size=6.0, colour=tcolour, ha="left")
+    return figstyle.finish(c.fig, out)[0]
 
-    # (b) MorphoMix: one Azure-B cell mask drives every component, on the GPU batch; the label is never changed
-    top_b = y_card - 0.22
-    c.panel_title(0.05, top_b - 0.2, "b", "MorphoMix")
+
+# one clear example per class and cohort, chosen by eye from random draws (not from any model output)
+COHORT_EXAMPLES = [
+    ("C-NMC 2019", "train", "CNMC_fold_1_UID_H10_71_1_hem.png", "CNMC_fold_2_UID_72_32_1_all.png", "AIIMS New Delhi"),
+    ("Bodzas 2023", "train_aux_bodzas2023", "bodzas2023_Lymphocyte_645.png", "bodzas2023_Lymphoblast_2320.png",
+     "Ostrava"),
+    ("LeukemiaAttri", "val", "8_11_1773.png", "6_26_1097.png", "Lahore"),
+    ("ALL-IDB2", "test_allidb2", "ALLIDB_Im167_0.png", "ALLIDB_Im001_1.png", "Milan"),
+    ("Aria", "test_aria", "ARIA_Benign_WBC-Benign-228.png", "ARIA_Pre_WBC-Malignant-Pre-378.png", "Tehran"),
+]
+
+
+def fig_cohort_examples(cfg: Dict, out: str) -> Optional[str]:
+    """One Normal and one ALL example of every cohort with the class counts, as the dataset figures of FocusAugMix."""
+    names = cfg["phase1"]["class_names"]
+    side, gap, label_w = 1.27, 0.12, 0.85
+    W = label_w + len(COHORT_EXAMPLES) * side + (len(COHORT_EXAMPLES) - 1) * gap + 0.08
+    row_h = side + 0.30
+    H = 0.62 + 2 * row_h
+    c = Canvas(W, H, font_scale=FIG_FONT_SCALE)
+    for j, (cohort, folder, normal, blast, lab) in enumerate(COHORT_EXAMPLES):
+        x = label_w + j * (side + gap)
+        c.text(x + side / 2, H - 0.18, cohort, size=7.0, weight="bold")
+        c.text(x + side / 2, H - 0.34, lab, size=6.0, colour=MUTED)
+        for r, (cls, file) in enumerate(zip(names, (normal, blast))):
+            n = len(glob.glob(abs_path(f"data/processed/{folder}/{cls}/*.png")))
+            y = H - 0.52 - (r + 1) * row_h + 0.28
+            img = rgb(f"data/processed/{folder}/{cls}/{file}")
+            c.image(img, x, y, side, edge=ROLE["test"] if cls == names[1] else ROLE["select"], lw=1.2)
+            unit = "fields" if folder == "test_aria" else "cells"
+            c.text(x + side / 2, y - 0.10, f"{n:,} {unit}", size=6.0, colour=MUTED)
+    for r, cls in enumerate(names):
+        y = H - 0.52 - (r + 1) * row_h + 0.28 + side / 2
+        c.text(label_w - 0.10, y, cls, size=7.2, weight="bold", ha="right",
+               colour=ROLE["test"] if cls == names[1] else ROLE["select"])
+    return figstyle.finish(c.fig, out)[0]
+
+
+def morpho_stages(cfg: Dict, img: np.ndarray, bank: StyleBank, seed: int = 42) -> Dict[str, np.ndarray]:
+    """The real MorphoMix on one cell, components accumulated in execution order at full strength (probability 1,
+    C1 towards one drawn bank cell, a = 1), plus the cell mask and the Azure-B prior."""
+    batch = to_tensor(img)
+    cam = PriorOnlyCAM(prior_threads=1).generate(batch)
     tau = float(cfg["morpho_threshold"])
-    cell = aug["02_input_all"]
-    steps = [
-        (cell, "input cell $x$", "label $y$", ROLE["train"]),
-        (prior_map(cell), "Azure-B prior", "soft cell envelope", "#7A7A7A"),
-        (mask_view(cell, tau), "cell mask $M$", f"prior $\\geq \\tau = {tau:.2f}$", "#7A7A7A"),
-        (aug["07_morphomix_c1_stain"], "$C_1$ in-cell stain",
-         f"nucleus, cytoplasm\nto an MLL23 cell\np = {cfg['appearance_prob']}", figstyle.COLOURS["orange"]),
-        (aug["08_morphomix_c1_c2p_small_cell"], "$C_2$ small cell",
-         f"to {cfg['small_cell_px'][0]}-{cfg['small_cell_px'][1]} px,\nor low detail\np = {cfg['small_cell_prob']}",
-         figstyle.COLOURS["orange"]),
-        (aug["10_morphomix_c1_c2p_c3"], "$C_3$ background",
-         f"synthetic smear\noutside $M$\np = {cfg['background_prob']:.3f}", figstyle.COLOURS["orange"]),
-    ]
-    side, step_gap = 0.76, 0.20
-    model_w = W - 2 * margin - len(steps) * side - len(steps) * step_gap
-    y_img = top_b - 0.62 - side
-    x_ours = margin + 3 * (side + step_gap) - 0.07
-    c.box(x_ours, y_img - 0.64, 3 * side + 2 * step_gap + 0.14, side + 0.92, FILL["ours"],
-          ec=figstyle.COLOURS["paleorange"], lw=0.8)
-    c.text(x_ours + 0.07, y_img + side + 0.15, "MorphoMix components (label unchanged)", size=6.3,
-           weight="bold", colour=figstyle.COLOURS["darkorange"], ha="left")
-    for i, (img, name, note, edge) in enumerate(steps):
-        x = margin + i * (side + step_gap)
-        c.image(img, x, y_img, side, edge=edge, lw=1.1)
-        c.text(x + side / 2, y_img - 0.11, name, size=6.6, weight="bold")
-        if note:
-            c.text(x + side / 2, y_img - 0.24, note, size=5.7, colour=MUTED, va="top", linespacing=1.25)
-        c.arrow(x + side + 0.03, y_img + side / 2, x + side + step_gap - 0.03, y_img + side / 2)
-    x_model = margin + len(steps) * (side + step_gap)
-    c.box(x_model, y_img + 0.04, model_w, side - 0.08, "#E6E6E6", ec="#9A9A9A", lw=0.7)
-    c.text(x_model + model_w / 2, y_img + side / 2 + 0.15, "ConvNeXt V2", size=6.6, weight="bold")
-    c.text(x_model + model_w / 2, y_img + side / 2 - 0.01, "Atto", size=6.6, weight="bold")
-    c.text(x_model + model_w / 2, y_img + side / 2 - 0.19, "weighted CE on $y$", size=5.7, colour=MUTED)
 
-    # (c) whole fields are scored cell by cell with the single-cell model
-    top_c = y_img - 0.72
-    c.panel_title(0.05, top_c - 0.2, "c", "Whole-field inference (Aria)")
+    def run(**switches):
+        torch.manual_seed(seed)
+        kwargs = {"appearance_prob": 1.0, "rsn_prob": 0.0, "small_cell_lowdetail_prob": 0.0, **switches}
+        out, masks = apply_morpho_mix(
+            batch, cam, threshold=tau, bank=bank, appearance_alpha=(1.0, 1.0), virtual_template_prob=0.0,
+            small_cell_px=tuple(cfg["small_cell_px"]), background_prob=1.0,
+            background_rbc=tuple(cfg["background_rbc"]), **kwargs)
+        return to_numpy(out), masks[0, 0].numpy() > 0.5
+
+    c1, _ = run(use_background=False)
+    c1_c2, _ = run(small_cell_prob=1.0, use_background=False)
+    c1_c2_low, _ = run(small_cell_prob=1.0, small_cell_lowdetail_prob=1.0, use_background=False)
+    c1_c3, _ = run(use_background=True)
+    c1_c2_c3, mask_after_c2 = run(small_cell_prob=1.0)
+    return {"input": img, "prior": prior_map(img), "mask": mask_view(img, tau), "c1": c1, "c1_c2": c1_c2,
+            "c1_c2_low": c1_c2_low, "c1_c3": c1_c3, "c1_c2_c3": c1_c2_c3, "mask_after_c2": mask_after_c2}
+
+
+def fig_morphomix(cfg: Dict, out: str) -> Optional[str]:
+    """The MorphoMix pipeline on one training cell: one cell mask, three components in order, label unchanged."""
+    bank = StyleBank.load(cfg["style_bank"]["path"])
+    s = morpho_stages(cfg, rgb(EXAMPLES["cnmc"]), bank)
+    tau = float(cfg["morpho_threshold"])
+    W, side = figstyle.WIDTH_DOUBLE, 0.80
+    y_img = 0.95
+    H = y_img + side + 1.02
+    c = Canvas(W, H, font_scale=FIG_FONT_SCALE)
+    orange, dark = figstyle.COLOURS["orange"], figstyle.COLOURS["darkorange"]
+    steps = [
+        (s["input"], "1 training cell $x$", "C-NMC or Bodzas,\nlabel $y$", ROLE["train"]),
+        (s["prior"], "2 Azure-B prior", "soft cell\nenvelope", "#7A7A7A"),
+        (s["mask"], "3 cell mask $M$", f"prior $\\geq {tau:.2f}$,\nno black pixels", "#7A7A7A"),
+        (s["c1"], "4 $C_1$ stain", f"inside $M$ only,\np = {cfg['appearance_prob']}", orange),
+        (s["c1_c2"], "5 $C_2$ small cell", f"{cfg['small_cell_px'][0]}-{cfg['small_cell_px'][1]} px, low detail,\n"
+         f"p = {cfg['small_cell_prob']}", orange),
+        (s["c1_c2_c3"], "6 $C_3$ background", f"smear outside $M$,\np = {cfg['background_prob']:.3f}", orange),
+    ]
+    margin, gap = 0.12, 0.28
+    x_ours = margin + 3 * (side + gap) - 0.10
+    c.box(x_ours, y_img - 0.76, 3 * side + 2 * gap + 0.20, side + 0.96, FILL["ours"], ec=figstyle.COLOURS["paleorange"])
+    c.text(x_ours + 0.10, y_img - 0.66, "MorphoMix components (label unchanged)", size=6.6, weight="bold",
+           colour=dark, ha="left")
+    for i, (img, name, note, edge) in enumerate(steps):
+        x = margin + i * (side + gap)
+        if i == 0:
+            stack(c, img, x, y_img, side - 0.09, edge)
+        else:
+            c.image(img, x, y_img, side, edge=edge, lw=1.2)
+        c.text(x + side / 2, y_img - 0.12, name, size=6.6, weight="bold")
+        c.text(x + side / 2, y_img - 0.26, note, size=5.9, colour=MUTED, va="top", linespacing=1.25)
+        c.arrow(x + side + 0.03, y_img + side / 2, x + side + gap - 0.03, y_img + side / 2)
+    # the MLL23 style bank supplies colour statistics to C1 only
+    x1 = margin + 3 * (side + gap)
+    c.box(x1 - 0.02, H - 0.52, side + 0.6, 0.42, "#F5F5F5", ec="#9A9A9A", lw=0.7)
+    c.text(x1 + side / 2 + 0.28, H - 0.31, "MLL23 style bank", size=6.4, weight="bold")
+    c.text(x1 + side / 2 + 0.28, H - 0.44, "Lab mean, sd per region", size=5.7, colour=MUTED)
+    c.arrow(x1 + side / 2, H - 0.54, x1 + side / 2, y_img + side + 0.04, colour=orange, lw=1.1, ls=(0, (3, 2)))
+    x_model = margin + 6 * (side + gap)
+    model_w = W - margin - x_model
+    c.box(x_model, y_img + 0.10, model_w, side - 0.20, "#E6E6E6", ec="#9A9A9A", lw=0.7)
+    c.text(x_model + model_w / 2, y_img + side / 2 + 0.12, "ConvNeXt", size=6.4, weight="bold")
+    c.text(x_model + model_w / 2, y_img + side / 2 - 0.02, "V2 Atto", size=6.4, weight="bold")
+    c.text(x_model + model_w / 2, y_img + side / 2 - 0.20, "weighted CE", size=5.7, colour=MUTED)
+    # the label never changes
+    y_lab = 0.14
+    c.ax.plot([margin + side / 2, margin + side / 2], [y_lab, y_img - 0.62], color=ROLE["train"], lw=1.0)
+    c.ax.plot([margin + side / 2, x_model + model_w / 2], [y_lab, y_lab], color=ROLE["train"], lw=1.0)
+    c.arrow(x_model + model_w / 2, y_lab, x_model + model_w / 2, y_img + 0.08, colour=ROLE["train"], lw=1.0, head=7)
+    c.text((margin + side / 2 + x_ours) / 2, y_lab + 0.10, "label $y$ passes unchanged (no label mixing)",
+           size=6.2, colour=ROLE["train"])
+    return figstyle.finish(c.fig, out)[0]
+
+
+def fig_c1_method(cfg: Dict, out: str) -> Optional[str]:
+    """C1 and the MLL23 style bank as a flow: (a) how the bank is built from MLL23 cells, (b) how one training cell is
+    recoloured from it, (c) the same references on an ALL and a Normal cell."""
+    from src.datasets.cells import cell_mask as mask_of, load_rgb, nucleus_cell
+    bank = StyleBank.load(cfg["style_bank"]["path"])
+    tau = float(cfg["morpho_threshold"])
+    refs = c1_references(bank)
+    with np.load(abs_path(cfg["style_bank"]["path"])) as z:
+        paths = [str(p) for p in z["paths"]]
+    root = abs_path(cfg["style_bank"]["source_dir"])
+    sw = swatch_colours(bank, refs)
+    orange, dark = figstyle.COLOURS["orange"], figstyle.COLOURS["darkorange"]
+
+    side, gap = 1.0, 0.56
+    n_cols = 5
+    row_h = 0.42 + side + 0.80
+    c_h = 0.42 + 2 * (side + 0.12) + 0.10
+    W, H = figstyle.WIDTH_DOUBLE, 2 * row_h + c_h + 0.05
+    c = Canvas(W, H, font_scale=FIG_FONT_SCALE)
+    x_col = [0.14 + j * (side + gap) for j in range(n_cols)]
+
+    def step(col, y, img, title, note, edge="#BBBBBB", lw=0.8):
+        c.image(img, x_col[col], y, side, edge=edge, lw=lw)
+        c.text(x_col[col] + side / 2, y - 0.12, title, size=6.6, weight="bold", va="top")
+        c.text(x_col[col] + side / 2, y - 0.31, note, size=5.8, colour=MUTED, va="top", linespacing=1.25)
+
+    def arrows(y, colour="#7A7A7A"):
+        for j in range(n_cols - 1):
+            c.arrow(x_col[j] + side + 0.05, y + side / 2, x_col[j + 1] - 0.05, y + side / 2, colour=colour)
+
+    # (a) building the bank from one MLL23 cell
+    y_a = H - 0.42 - side
+    c.text(0.14, H - 0.17, "(a) Style bank, built once from MLL23: statistics only, no image and no label is kept",
+           size=7.0, weight="bold", ha="left")
+    raw = load_rgb(os.path.join(root, paths[refs[1]]), cfg["img_size"])
+    cell = nucleus_cell(raw, mask_of(raw, tau), cfg["style_bank"]["ring"], cfg["style_bank"]["min_sat"]) > 0
+    r0, c0, half = crop_to_cell(raw, cell, margin=14)
+
+    def window(img):
+        return img[r0:r0 + 2 * half, c0:c0 + 2 * half]
+
+    outline = raw.copy()
+    contours, _ = cv2.findContours(cell.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    cv2.drawContours(outline, contours, -1, (255, 255, 255), 2)
+    step(0, y_a, window(raw), "1  MLL23 cell", "Munich, one of 41,621;\nthe label is ignored")
+    step(1, y_a, window(outline), "2  cell mask", "central nucleus plus a\n20 px ring of cytoplasm")
+    step(2, y_a, window(region_map(raw, cell)), "3  two regions",
+         "nucleus (purple), cytoplasm\n(cyan): Otsu on saturation")
+    c.box(x_col[3], y_a, side, side, "#F5F5F5", ec="#BBBBBB", lw=0.8)
+    draw_swatch(c, x_col[3] + side / 2, y_a + side / 2 + 0.05, sw[1], size=0.62)
+    c.text(x_col[3] + side / 2, y_a + 0.13, "$\\mu,\\sigma$ of L, a, b", size=5.8, colour=MUTED)
+    c.text(x_col[3] + side / 2, y_a - 0.12, "4  statistics", size=6.6, weight="bold", va="top")
+    c.text(x_col[3] + side / 2, y_a - 0.31, "Lab mean and sd per\nregion: 12 numbers", size=5.8, colour=MUTED, va="top",
+           linespacing=1.25)
+    c.box(x_col[4], y_a, side, side, "#F5F5F5", ec="#BBBBBB", lw=0.8)
+    for k, j in enumerate((2, 0, 1)):
+        draw_swatch(c, x_col[4] + 0.30 + 0.20 * k, y_a + 0.80 - 0.19 * k, sw[j], size=0.34)
+    c.text(x_col[4] + side / 2, y_a + 0.10, "41,146 rows", size=6.0, colour=INK)
+    c.text(x_col[4] + side / 2, y_a - 0.12, "5  style bank", size=6.6, weight="bold", va="top")
+    c.text(x_col[4] + side / 2, y_a - 0.31, "one row per cell;\nimages and labels dropped", size=5.8, colour=MUTED,
+           va="top", linespacing=1.25)
+    arrows(y_a)
+
+    # (b) recolouring one training cell
+    y_b = H - row_h - 0.42 - side
+    c.text(0.14, H - row_h - 0.17, "(b) $C_1$ on a training cell (every batch, probability 0.5)", size=7.0,
+           weight="bold", ha="left")
+    img = rgb(C1_EXAMPLES[0][1])
+    x = torch.from_numpy(img.copy()).permute(2, 0, 1)[None].float() / 255
+    mask = torch.from_numpy(cell_mask(img, tau))[None, None]
+    ref = 1
+    matched = match_regions(x, mask, bank.mean[refs[ref]][None], bank.sd[refs[ref]][None])
+    alpha = 0.7
+    blended = (x + alpha * (matched - x))[0].permute(1, 2, 0).numpy()
+    mm = mask[0, 0].numpy() > 0
+    t0, t1, tw = crop_to_cell(img, mm)
+
+    def win(a):
+        return a[t0:t0 + 2 * tw, t1:t1 + 2 * tw]
+
+    to8 = lambda a: np.uint8(np.round(255 * a))  # noqa: E731
+    step(0, y_b, win(img), "1  training cell", "C-NMC or Bodzas,\nALL or Normal alike", edge=ROLE["train"], lw=1.1)
+    step(1, y_b, win(region_map(img, mm)), "2  mask M, two regions", "same Otsu split\nof the training cell")
+    c.box(x_col[2], y_b, side, side, "#F5F5F5", ec=orange, lw=1.1)
+    draw_swatch(c, x_col[2] + side / 2, y_b + side / 2 + 0.05, sw[ref], size=0.62)
+    c.text(x_col[2] + side / 2, y_b + 0.13, "$\\mu^{*},\\sigma^{*}$", size=5.8, colour=MUTED)
+    c.text(x_col[2] + side / 2, y_b - 0.12, "3  reference", size=6.6, weight="bold", va="top")
+    c.text(x_col[2] + side / 2, y_b - 0.31, "a bank row (0.5) or a\nvirtual template (0.5)", size=5.8, colour=MUTED,
+           va="top", linespacing=1.25)
+    step(3, y_b, win(to8(matched[0].permute(1, 2, 0).numpy())), "4  match", "Reinhard per region,\nin Lab (Eq. 1)",
+         edge=orange, lw=1.1)
+    step(4, y_b, win(to8(blended)), "5  blend", f"strength a ~ U[0.5, 1] (a = {alpha});\noutside M unchanged",
+         edge=orange, lw=1.1)
+    arrows(y_b)
+    x_link, y_link = x_col[4] + side / 2, y_b + side + 0.10
+    c.ax.plot([x_link, x_link], [y_a - 0.62, y_link], color=orange, lw=1.1, ls=(0, (3, 2)), zorder=4)
+    c.ax.plot([x_link, x_col[2] + side / 2], [y_link, y_link], color=orange, lw=1.1, ls=(0, (3, 2)), zorder=4)
+    c.arrow(x_col[2] + side / 2, y_link, x_col[2] + side / 2, y_b + side + 0.02, colour=orange, lw=1.1)
+    c.text((x_link + x_col[2] + side / 2) / 2, y_link + 0.08, "draw a row of the bank", size=5.8, colour=dark)
+
+    # (c) the same references on an ALL and on a Normal cell
+    y_c0 = H - 2 * row_h - 0.42
+    c.text(0.14, H - 2 * row_h - 0.17, "(c) The same four references recolour ALL and Normal cells: stain carries "
+           "no class information", size=7.0, weight="bold", ha="left")
+    for r, (_, path) in enumerate(C1_EXAMPLES[:2]):
+        im = rgb(path)
+        xt = torch.from_numpy(im.copy()).permute(2, 0, 1)[None].float() / 255
+        mk = torch.from_numpy(cell_mask(im, tau))[None, None]
+        outs = match_regions(xt.expand(4, -1, -1, -1), mk.expand(4, -1, -1, -1), bank.mean[refs], bank.sd[refs])
+        m = mk[0, 0].numpy() > 0
+        a0, a1, aw = crop_to_cell(im, m)
+        y = y_c0 - (r + 1) * (side + 0.12) + 0.12
+        shown = [im, *[to8(o.permute(1, 2, 0).numpy()) for o in outs]]
+        for j, s_img in enumerate(shown):
+            edge, lw = (orange, 1.0) if j else ("#BBBBBB", 0.7)
+            c.image(s_img[a0:a0 + 2 * aw, a1:a1 + 2 * aw], x_col[j], y, side, edge=edge, lw=lw)
+            if r == 0:
+                c.text(x_col[j] + side / 2, y + side + 0.09, "training cell" if j == 0 else f"reference {j}", size=6.2,
+                       weight="bold", colour=dark if j else INK)
+        c.text(x_col[0] - 0.05, y + side / 2, "ALL" if "/ALL/" in path else "Normal", size=7.0, weight="bold",
+               ha="right", colour=MUTED)
+    return figstyle.finish(c.fig, out)[0]
+
+
+def fig_c2_c3_method(cfg: Dict, out: str) -> Optional[str]:
+    """C2 (small cell) and C3 (synthetic smear background) in detail: the layers of the background and how the cell
+    is composited over erythrocytes that are drawn behind it, at cell scale and at field scale."""
+    from src.augmentations.background import synthesize_backgrounds
+    bank = StyleBank.load(cfg["style_bank"]["path"])
+    s = morpho_stages(cfg, rgb(EXAMPLES["cnmc"]), bank)
+    cell, c1 = s["input"], s["c1"]
+    n_rbc = tuple(cfg["background_rbc"])
+
+    def layer(illumination: float, rbc: tuple, seed: int = 11) -> np.ndarray:
+        torch.manual_seed(seed)
+        torch.rand((1, 1, 1, 1))  # the draw apply_background_randomization burns before the background
+        bg = synthesize_backgrounds(1, 224, 224, device=torch.device("cpu"), n_rbc=rbc, illumination=illumination)
+        return np.uint8(255 * bg[0].permute(1, 2, 0).numpy())
+
+    plasma, lit, smear = layer(0.0, (0, 0)), layer(0.18, (0, 0)), layer(0.18, n_rbc)
+    batch = to_tensor(c1)
+    cam = PriorOnlyCAM(prior_threads=1).generate(to_tensor(cell))
+    tau = float(cfg["morpho_threshold"])
+    from src.augmentations.background import apply_background_randomization
+    from src.augmentations.morpho_mix import binarize_heatmaps
+    masks = binarize_heatmaps(cam, tau)
+    torch.manual_seed(11)
+    composed = to_numpy(apply_background_randomization(batch, masks, prob=1.0, n_rbc=n_rbc))
+
+    W, side, gap, label_w = figstyle.WIDTH_DOUBLE, 1.10, 0.14, 0.15
+    n = 5
+    x_col = [label_w + 0.05 + j * (side + gap) for j in range(n)]
+    row_h = side + 0.42
+    H = 0.40 + 2 * row_h + 0.35
+    c = Canvas(W, H, font_scale=FIG_FONT_SCALE)
+    orange = figstyle.COLOURS["orange"]
+    mask_img = mask_view(cell, tau)
+
+    y1 = H - 0.40 - side
+    c.text(label_w, H - 0.20, "(a) $C_2$ small cell: the cell shrinks to a white cell of a whole field", size=7.2,
+           weight="bold", ha="left")
+    row1 = [(c1, "after $C_1$", "#BBBBBB"), (mask_img, "cell mask $M$", "#BBBBBB"),
+            (s["c1_c2"], f"shrunk {cfg['small_cell_px'][0]}-{cfg['small_cell_px'][1]} px", orange),
+            (s["c1_c2_low"], "or low detail", orange)]
+    for j, (img, name, edge) in enumerate(row1):
+        c.image(img, x_col[j], y1, side, edge=edge, lw=1.1 if edge == orange else 0.6)
+        c.text(x_col[j] + side / 2, y1 - 0.10, name, size=6.2, weight="bold", va="top")
+    c.text(x_col[4], y1 + side / 2, "never enlarged;\nleft on black here,\nthe next row gives\nit a smear",
+           size=6.0, colour=MUTED, ha="left", linespacing=1.3)
+
+    y2 = y1 - row_h - 0.16
+    c.text(label_w, y2 + side + 0.25, "(b) $C_3$ background: a synthetic smear is drawn outside $M$; erythrocytes lie "
+           "behind the cell", size=7.2, weight="bold", ha="left")
+    row2 = [(plasma, "1  plasma tint", "#BBBBBB"), (lit, "2  + illumination", "#BBBBBB"),
+            (smear, f"3  + {n_rbc[0]}-{n_rbc[1]} erythrocytes", "#BBBBBB"),
+            (composed, "4  cell over smear", orange),
+            (s["c1_c2_c3"], f"field scale: {cfg['field_rbc'][0]}-{cfg['field_rbc'][1]}\nsmall erythrocytes", orange)]
+    for j, (img, name, edge) in enumerate(row2):
+        c.image(img, x_col[j], y2, side, edge=edge, lw=1.1 if edge == orange else 0.6)
+        c.text(x_col[j] + side / 2, y2 - 0.10, name, size=6.2, weight="bold", va="top")
+        if j < 2:
+            c.arrow(x_col[j] + side + 0.02, y2 + side / 2, x_col[j + 1] - 0.02, y2 + side / 2)
+    c.arrow(x_col[2] + side + 0.02, y2 + side / 2, x_col[3] - 0.02, y2 + side / 2, colour=orange)
+    c.text(W - 0.08, 0.08, "Cell pixels are never overwritten; the feathered edge is clamped to the cell, and no "
+           "real image is pasted in.", size=6.0, colour=MUTED, ha="right")
+    return figstyle.finish(c.fig, out)[0]
+
+
+def fig_field_inference(cfg: Dict, out: str) -> Optional[str]:
+    """Whole-field inference on an Aria field: detect white cells, crop, score with the single-cell model, average."""
     inf = cfg["inference"]["cells"]
     name, probs = example_field(cfg)
     field = rgb(f"data/processed/test_aria/ALL/{name}")
@@ -575,48 +918,44 @@ def fig_overview(cfg: Dict, out: str) -> Optional[str]:
     if len(cells) != len(probs):
         raise RuntimeError(f"{name}: {len(cells)} detections here, {len(probs)} scored cells in the predictions")
     drawn = field.copy()
-    for k, (x, y, r) in enumerate(cells):
+    for x, y, r in cells:
         cv2.circle(drawn, (int(round(x)), int(round(y))), int(round(r)) + 3, (255, 214, 0), 2)
-    side_c = 1.30
-    y_row = top_c - 0.30 - side_c
-    x = margin
-    c.image(drawn, x, y_row, side_c, edge=ROLE["test"], lw=1.1)
-    c.text(x + side_c / 2, y_row - 0.12, f"field, {len(cells)} whole white cells", size=6.4, weight="bold")
-    c.text(x + side_c / 2, y_row - 0.28, "saturation Otsu + Azure-B prior", size=5.9, colour=MUTED)
+    W, H = figstyle.WIDTH_DOUBLE, 2.45
+    c = Canvas(W, H, font_scale=FIG_FONT_SCALE)
+    margin, side_c = 0.12, 1.55
+    y_row = 0.62
+    c.image(drawn, margin, y_row, side_c, edge=ROLE["test"], lw=1.3)
+    c.text(margin + side_c / 2, y_row - 0.14, f"field, {len(cells)} whole white cells", size=6.6, weight="bold")
+    c.text(margin + side_c / 2, y_row - 0.30, "saturation Otsu + Azure-B prior;\nborder-cut and nucleus-free\n"
+           "detections are dropped", size=5.9, colour=MUTED, va="top", linespacing=1.25)
     window = float(cfg["img_size"]) / float(inf["scale"])
-    crop_side, crop_gap = 0.56, 0.08
-    shown = min(len(cells), 4)
-    x_crops = x + side_c + 0.42
-    c.arrow(x + side_c + 0.06, y_row + side_c / 2, x_crops - 0.06, y_row + side_c / 2)
-    for k in range(shown):
+    crop_side, crop_gap = 0.70, 0.08
+    x_crops = margin + side_c + 0.45
+    c.arrow(margin + side_c + 0.06, y_row + side_c / 2, x_crops - 0.06, y_row + side_c / 2)
+    for k in range(min(len(cells), 4)):
         cx, cy, _ = cells[k]
-        crop = crop_window(field, cx, cy, window)
         row, col = divmod(k, 2)
         xk = x_crops + col * (crop_side + crop_gap)
-        yk = y_row + side_c - (row + 1) * crop_side - row * crop_gap
-        c.image(crop, xk, yk, crop_side, edge="#9A9A9A", lw=0.7)
-        if probs is not None:
-            # Dark on light: white text in a PDF reads as hidden text to plagiarism checkers
-            c.text(xk + crop_side / 2, yk + 0.06, f"{probs[k]:.2f}", size=5.8, colour=INK, weight="bold",
-                   va="bottom", bbox=dict(boxstyle="round,pad=0.12", fc="white", ec="#9A9A9A", lw=0.4, alpha=0.9))
-    x_end_crops = x_crops + 2 * crop_side + crop_gap
-    c.text((x_crops + x_end_crops) / 2, y_row - 0.12, f"crops of {window:.0f} px to 224 px", size=6.4,
-           weight="bold")
-    c.text((x_crops + x_end_crops) / 2, y_row - 0.28, "p(ALL) per cell, one model", size=5.9, colour=MUTED)
-    x_m = x_end_crops + 0.42
-    c.arrow(x_end_crops + 0.06, y_row + side_c / 2, x_m - 0.06, y_row + side_c / 2)
-    box_w = 1.25
-    c.box(x_m, y_row + 0.30, box_w, side_c - 0.60, "#E6E6E6", ec="#9A9A9A", lw=0.7)
-    field_p = float(np.mean(probs)) if probs is not None and len(probs) else float("nan")
+        yk = y_row + side_c - (row + 1) * crop_side - row * crop_gap - 0.07
+        c.image(crop_window(field, cx, cy, window), xk, yk, crop_side, edge="#9A9A9A", lw=0.7)
+        c.text(xk + crop_side / 2, yk + 0.07, f"{probs[k]:.2f}", size=6.0, colour=INK, weight="bold", va="bottom",
+               bbox=dict(boxstyle="round,pad=0.12", fc="white", ec="#9A9A9A", lw=0.4, alpha=0.9))
+    x_end = x_crops + 2 * crop_side + crop_gap
+    c.text((x_crops + x_end) / 2, y_row - 0.14, f"crops of {window:.0f} px to 224 px", size=6.6, weight="bold")
+    c.text((x_crops + x_end) / 2, y_row - 0.30, "p(ALL) per cell, one model", size=5.9, colour=MUTED)
+    x_m = x_end + 0.45
+    c.arrow(x_end + 0.06, y_row + side_c / 2, x_m - 0.06, y_row + side_c / 2)
+    box_w, field_p = 1.30, float(np.mean(probs))
+    c.box(x_m, y_row + 0.35, box_w, side_c - 0.70, "#E6E6E6", ec="#9A9A9A", lw=0.7)
     c.text(x_m + box_w / 2, y_row + side_c / 2 + 0.12, "mean over cells", size=6.6, weight="bold")
     c.text(x_m + box_w / 2, y_row + side_c / 2 - 0.08, f"p(ALL) = {field_p:.2f}", size=6.6)
-    x_d = x_m + box_w + 0.42
+    x_d = x_m + box_w + 0.45
     c.arrow(x_m + box_w + 0.06, y_row + side_c / 2, x_d - 0.06, y_row + side_c / 2)
     dec_w = W - margin - x_d
-    c.box(x_d, y_row + 0.30, dec_w, side_c - 0.60, FILL["test"], ec=ROLE["test"], lw=0.7)
+    c.box(x_d, y_row + 0.35, dec_w, side_c - 0.70, FILL["test"], ec=ROLE["test"], lw=0.7)
     label = cfg["phase1"]["class_names"][int(field_p >= 0.5)]
-    c.text(x_d + dec_w / 2, y_row + side_c / 2 + 0.12, f"predicted label: {label}", size=6.6, weight="bold")
-    c.text(x_d + dec_w / 2, y_row + side_c / 2 - 0.08, "ALL iff p(ALL) $\\geq$ 0.5", size=6.2, colour=MUTED)
+    c.text(x_d + dec_w / 2, y_row + side_c / 2 + 0.12, f"label: {label}", size=6.6, weight="bold")
+    c.text(x_d + dec_w / 2, y_row + side_c / 2 - 0.08, "ALL iff p(ALL) $\\geq$ 0.5", size=6.0, colour=MUTED)
     return figstyle.finish(c.fig, out)[0]
 
 
@@ -647,6 +986,14 @@ def example_field(cfg: Dict, n_cells: int = 4) -> tuple:
 
 COHORTS = [("val", "LeukemiaAttri (selection)"), ("allidb2", "ALL-IDB2 (single cells)"),
            ("aria", "Aria (whole fields)")]
+PANEL_WIDTH = 3.9  # one cohort as its own figure: ISWA takes one image per file
+
+
+def panel_cohorts(panel: Optional[int]) -> tuple:
+    """The cohorts to draw and the figure width: all three side by side, or the cohort `panel` as its own figure."""
+    return (COHORTS, figstyle.WIDTH_DOUBLE) if panel is None else ([COHORTS[panel]], PANEL_WIDTH)
+
+
 ABLATION = {"b": "no $C_1$ (in-cell stain)", "c": "no $C_2$ (small cell)", "d": "no $C_3$ (background)",
             "e": "$C_1$ as RandStainNA"}  # arm f (no auxiliary cells) is in fig_aux
 
@@ -702,7 +1049,7 @@ def figure_arms(cfg: Dict, present) -> List[str]:
     return [a for a in order if a in set(present)]
 
 
-def fig_main_results(cfg: Dict, out: str) -> Optional[str]:
+def fig_main_results(cfg: Dict, out: str, panel: Optional[int] = None) -> Optional[str]:
     """ROC-AUC per arm and cohort (seeds and mean +/- sd), against the ROC-AUC that background colour statistics
     alone reach on the same cohort."""
     runs, bg = table(cfg, "extended_metrics_runs.json"), table(cfg, "shortcut_background_only_auc.json")
@@ -712,9 +1059,10 @@ def fig_main_results(cfg: Dict, out: str) -> Optional[str]:
     arms = figure_arms(cfg, [r["augmentation"] for r in rows])
     labels = ["Background only"] * (bg is not None) + [figstyle.ARM_LABEL.get(a, a) for a in arms]
     offset = len(labels) - len(arms)
-    fig, axes = plt.subplots(1, 3, figsize=(figstyle.WIDTH_DOUBLE, 0.55 + 0.40 * len(labels)), sharey=True,
-                             sharex=True, layout="constrained")
-    for ax, (key, title) in zip(axes, COHORTS):
+    cohorts, width = panel_cohorts(panel)
+    fig, axes = plt.subplots(1, len(cohorts), figsize=(width, 0.55 + 0.40 * len(labels)), sharey=True, sharex=True,
+                             layout="constrained", squeeze=False)
+    for ax, (key, title) in zip(axes[0], cohorts):
         if bg is not None:  # label information in the background (a classifier fitted on the cohort), not a comparator
             ref = bg[key]
             ax.scatter([ref], [0], marker="D", s=26, color=BG_REF, zorder=4)
@@ -731,7 +1079,7 @@ def fig_main_results(cfg: Dict, out: str) -> Optional[str]:
         ax.set_title(title, fontsize=7.6, fontweight="bold", loc="left")
         ax.set_xlabel("ROC-AUC")
         arm_axis(ax, labels)
-    axes[0].set_xlim(0.35, 1.0)
+    axes[0, 0].set_xlim(0.35, 1.0)
     return figstyle.finish(fig, out)[0]
 
 
@@ -739,7 +1087,7 @@ SHORTCUT_PARTS = ("residual", "swap")
 SHORTCUT_SCALE = 1.3  # text and markers of the shortcut figures, against the other result figures: dense panels
 
 
-def fig_shortcut(cfg: Dict, out: str, parts: tuple = SHORTCUT_PARTS) -> Optional[str]:
+def fig_shortcut(cfg: Dict, out: str, parts: tuple = SHORTCUT_PARTS, panel: Optional[int] = None) -> Optional[str]:
     """`residual` (two panels): ROC-AUC before and after removing what background statistics explain of each score
     (residual AUC), with the background-only reference; `swap` (two panels, ALL-IDB2): ROC-AUC with the cell on a
     same-class minus on an other-class background (a class-specific background effect), for every trained arm with
@@ -755,19 +1103,22 @@ def fig_shortcut(cfg: Dict, out: str, parts: tuple = SHORTCUT_PARTS) -> Optional
     rows = [(a, a, figstyle.ARM_LABEL.get(a, a)) for a in trained]
     rows += [(f"abl{NO_AUX[a]}", a, f"{figstyle.ARM_LABEL.get(a, a)}, no aux") for a in trained if a in NO_AUX]
     n_rows = {"residual": len(arms), "swap": len(rows)}
-    letters = iter("abcd")
+    letters = iter("abcd") if panel is None else None
+    which = (0, 1) if panel is None else (panel,)
     with plt.rc_context({"font.size": 8 * k}):
         height = 0.8 + 0.85 * len(parts) + 0.34 * sum(n_rows[p] for p in parts)
-        fig = plt.figure(figsize=(figstyle.WIDTH_DOUBLE, height), layout="constrained")
-        grid = fig.add_gridspec(len(parts), 2, height_ratios=[n_rows[p] + 1.2 for p in parts])
+        fig = plt.figure(figsize=(figstyle.WIDTH_DOUBLE if panel is None else PANEL_WIDTH, height),
+                         layout="constrained")
+        grid = fig.add_gridspec(len(parts), len(which), height_ratios=[n_rows[p] + 1.2 for p in parts])
         for r, part in enumerate(parts):
             left = fig.add_subplot(grid[r, 0])
-            panels = (left, fig.add_subplot(grid[r, 1], sharey=left))
-            panels[1].tick_params(labelleft=False)
+            panels = (left, *[fig.add_subplot(grid[r, c], sharey=left) for c in range(1, len(which))])
+            for extra in panels[1:]:
+                extra.tick_params(labelleft=False)
             if part == "residual":
-                draw_residual(panels, res, bg, arms, letters)
+                draw_residual(panels, res, bg, arms, letters, which)
             else:
-                draw_swap(panels, swap[swap["cohort"] == "allidb2"], rows, len(trained), letters)
+                draw_swap(panels, swap[swap["cohort"] == "allidb2"], rows, len(trained), letters, which)
         grey = figstyle.COLOURS["grey"]
         handles = {
             "residual": [plt.Line2D([], [], marker="o", linestyle="", color=grey, markersize=4.5 * k,
@@ -776,17 +1127,24 @@ def fig_shortcut(cfg: Dict, out: str, parts: tuple = SHORTCUT_PARTS) -> Optional
                                     markersize=4.5 * k, label="residual ROC-AUC"),
                          plt.Line2D([], [], color=BG_REF, linestyle=(0, (2, 3)), label="background only")],
             "swap": [plt.Line2D([], [], marker="o", linestyle="", markerfacecolor="white", markeredgecolor=grey,
-                                markersize=3.5 * k, label="seed")],
+                                markersize=3.5 * k, label="seed")] if 0 in which else [],
         }
+        if 1 in which and "swap" in parts:
+            handles["swap"] += [plt.Line2D([], [], marker="o", linestyle="", color=grey, markersize=4.5 * k,
+                                           label="original image"),
+                                plt.Line2D([], [], color=grey, marker=">", markersize=4.5 * k,
+                                           label="arrow tip and value: background removed")]
         legend = [h for p in parts for h in handles[p]]
-        fig.legend(handles=legend, loc="outside lower left", ncol=len(legend), fontsize=6.4 * k)
+        fig.legend(handles=legend, loc="outside lower left", ncol=len(legend) if panel is None else 1,
+                   fontsize=6.4 * k)
         return figstyle.finish(fig, out)[0]
 
 
-def draw_residual(axes, res: pd.DataFrame, bg: Optional[Dict], arms: List[str], letters) -> None:
+def draw_residual(axes, res: pd.DataFrame, bg: Optional[Dict], arms: List[str], letters, which=(0, 1)) -> None:
     """Model and residual ROC-AUC per arm on ALL-IDB2 and Aria (mean of seeds)."""
     k = SHORTCUT_SCALE
-    for ax, key, title in zip(axes, ("allidb2", "aria"), ("ALL-IDB2, residual", "Aria, residual")):
+    specs = [("allidb2", "ALL-IDB2, residual"), ("aria", "Aria, residual")]
+    for ax, (key, title) in zip(axes, [specs[i] for i in which]):
         sub = res[(res["cohort"] == key) & res["arm"].isin(arms)].groupby("arm")[["auc", "auc_residual"]].mean()
         for i, arm in enumerate(arms):
             colour, ours = arm_style(arm)
@@ -800,19 +1158,20 @@ def draw_residual(axes, res: pd.DataFrame, bg: Optional[Dict], arms: List[str], 
                         va="center", fontsize=6.0 * k, color=colour, fontweight="bold" if ours else "normal")
         if bg is not None:
             ax.axvline(bg[key], color=BG_REF, linestyle=(0, (2, 3)), linewidth=0.9, alpha=0.7, zorder=1)
-        ax.set_title(f"({next(letters)}) {title}", fontsize=7.6 * k, fontweight="bold", loc="left")
+        ax.set_title(f"({next(letters)}) {title}" if letters else title, fontsize=7.6 * k, fontweight="bold",
+                     loc="left")
         ax.set_xlabel("ROC-AUC")
         ax.set_xlim(0.45, 1.0)
         arm_axis(ax, [figstyle.ARM_LABEL.get(a, a) for a in arms])
 
 
-def draw_swap(axes, swap: pd.DataFrame, rows: List[tuple], n_trained: int, letters) -> None:
+def draw_swap(axes, swap: pd.DataFrame, rows: List[tuple], n_trained: int, letters, which=(0, 1)) -> None:
     """ALL-IDB2 background swap (class-specific effect per seed) and background removal (mean of seeds)."""
     k = SHORTCUT_SCALE
-    for ax, cols, title, xlabel in ((axes[0], ("class_specific_effect",), "ALL-IDB2, background swap",
-                                     "ROC-AUC, same-class minus\nother-class background"),
-                                    (axes[1], ("auc", "auc_none"), "ALL-IDB2, background removed",
-                                     "single-view ROC-AUC")):
+    specs = [(("class_specific_effect",), "ALL-IDB2, background swap",
+              "ROC-AUC, same-class minus\nother-class background"),
+             (("auc", "auc_none"), "ALL-IDB2, background removed", "single-view ROC-AUC")]
+    for ax, (cols, title, xlabel) in zip(axes, [specs[i] for i in which]):
         for i, (arm, style_arm, _) in enumerate(rows):
             colour, ours = arm_style(style_arm)
             sub = swap[swap["arm"] == arm]
@@ -835,12 +1194,13 @@ def draw_swap(axes, swap: pd.DataFrame, rows: List[tuple], n_trained: int, lette
         else:
             ax.set_xlim(0.55, 0.95)
         ax.axhline(n_trained - 0.5, color="#CCCCCC", linewidth=0.6)
-        ax.set_title(f"({next(letters)}) {title}", fontsize=7.6 * k, fontweight="bold", loc="left")
+        ax.set_title(f"({next(letters)}) {title}" if letters else title, fontsize=7.6 * k, fontweight="bold",
+                     loc="left")
         ax.set_xlabel(xlabel)
         arm_axis(ax, [label for *_, label in rows], bold_last=False)
 
 
-def fig_ablation(cfg: Dict, out: str) -> Optional[str]:
+def fig_ablation(cfg: Dict, out: str, panel: Optional[int] = None) -> Optional[str]:
     """Full MorphoMix minus the ablation arm in ROC-AUC per cohort, paired by seed (seeds and mean +/- sd), the sign
     of the supplement table: positive = the component helps."""
     runs = table(cfg, "component_ablation_runs.json")
@@ -850,10 +1210,11 @@ def fig_ablation(cfg: Dict, out: str) -> Optional[str]:
     order = [k for k in ABLATION if any(r["arm"] == k for r in runs)]
     if not full or not order:
         return None
-    fig, axes = plt.subplots(1, 3, figsize=(figstyle.WIDTH_DOUBLE, 0.6 + 0.40 * len(order)), sharey=True,
-                             sharex=True, layout="constrained")
+    cohorts, width = panel_cohorts(panel)
+    fig, axes = plt.subplots(1, len(cohorts), figsize=(width, 0.6 + 0.40 * len(order)), sharey=True, sharex=True,
+                             layout="constrained", squeeze=False)
     colour = figstyle.COLOURS["darkorange"]
-    for ax, (key, title) in zip(axes, COHORTS):
+    for ax, (key, title) in zip(axes[0], cohorts):
         for i, k in enumerate(order):
             deltas = [full[r["seed"]][f"{key}_roc_auc"] - r[f"{key}_roc_auc"]
                       for r in runs if r["arm"] == k and r["seed"] in full]
@@ -932,7 +1293,8 @@ def fig_cam(cfg: Dict, out: str) -> Optional[str]:
     rows = [(e, stage) for e in range(len(examples)) for stage in CAM_STAGES]
     n_cols = len(arms) + 1
     fig, axes = plt.subplots(len(rows), n_cols, figsize=(figstyle.WIDTH_DOUBLE, figstyle.WIDTH_DOUBLE / n_cols
-                                                         * len(rows) + 0.3), gridspec_kw=dict(wspace=0.04, hspace=0.04))
+                                                         * len(rows) + 0.3),
+                             gridspec_kw=dict(wspace=0.04, hspace=0.04, left=0.025, right=1.0))
     for r, (e, stage) in enumerate(rows):
         _, label, img, mask = examples[e]
         contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
@@ -963,7 +1325,7 @@ def fig_cam(cfg: Dict, out: str) -> Optional[str]:
 NO_AUX = {"basic": "h", "hed_jitter": "i", "randstainna": "j", "stain_mixup": "k", "morpho_mix": "f"}
 
 
-def fig_aux(cfg: Dict, out: str) -> Optional[str]:
+def fig_aux(cfg: Dict, out: str, panel: Optional[int] = None) -> Optional[str]:
     """ROC-AUC of every arm without (hollow) and with (filled) the auxiliary cells on the ablation seeds, and
     MorphoMix with the auxiliary cells colour-matched to the C-NMC template (control arm g, square)."""
     runs, abl = table(cfg, "extended_metrics_runs.json"), table(cfg, "component_ablation_runs.json")
@@ -973,9 +1335,10 @@ def fig_aux(cfg: Dict, out: str) -> Optional[str]:
     arms = [a for a in figure_arms(cfg, NO_AUX) if any(r["arm"] == NO_AUX[a] for r in abl)]
     if not arms:
         return None
-    fig, axes = plt.subplots(1, 3, figsize=(figstyle.WIDTH_DOUBLE, 0.7 + 0.40 * len(arms)), sharey=True,
-                             sharex=True, layout="constrained")
-    for ax, (key, title) in zip(axes, COHORTS):
+    cohorts, width = panel_cohorts(panel)
+    fig, axes = plt.subplots(1, len(cohorts), figsize=(width, 0.7 + 0.40 * len(arms) + 0.2 * (panel is not None)),
+                             sharey=True, sharex=True, layout="constrained", squeeze=False)
+    for ax, (key, title) in zip(axes[0], cohorts):
         for i, arm in enumerate(arms):
             colour, ours = arm_style(arm)
             with_aux = np.mean([r["roc_auc"] for r in runs
@@ -999,7 +1362,7 @@ def fig_aux(cfg: Dict, out: str) -> Optional[str]:
                plt.Line2D([], [], marker="o", linestyle="", color=grey, markersize=4.5, label="with auxiliary cells"),
                plt.Line2D([], [], marker="s", linestyle="", color=figstyle.COLOURS["darkorange"], markersize=4.5,
                           label="colour-matched auxiliary cells")]
-    fig.legend(handles=handles, loc="outside lower left", ncol=3, fontsize=6.4)
+    fig.legend(handles=handles, loc="outside lower left", ncol=3 if panel is None else 1, fontsize=6.4)
     return figstyle.finish(fig, out)[0]
 
 
@@ -1062,18 +1425,18 @@ def fig_graphical_abstract(cfg: Dict, out: str) -> Optional[str]:
     design = [("train", "Train", [("cnmc", "C-NMC", "cells"), ("bodzas", "Bodzas", "auxiliary")]),
               ("select", "Select", [("leukemiaattri", "LeukemiaAttri", "cells")]),
               ("test", "Test", [("allidb2", "ALL-IDB2", "cells"), ("aria", "Aria", "whole fields")])]
-    side, pitch = 0.92, 1.30
+    side, pitch = 0.84, 1.30
     for r, (role, label, cohorts) in enumerate(design):
-        y = title_y - 0.38 - side - r * 1.42
+        y = title_y - 0.38 - side - r * 1.50
         c.text(0.36, y + side / 2, label, size=19, weight="bold", colour=ROLE[role], ha="left")
         if r:
             c.arrow(0.74, y + side + 0.42, 0.74, y + side / 2 + 0.24, colour=ROLE[role], lw=2.0, head=18)
         for k, (key, name, kind) in enumerate(cohorts):
-            x = 1.62 + k * pitch
+            x = 1.75 + k * pitch
             img = rgb(f"data/processed/test_aria/ALL/{example_field(cfg)[0]}" if key == "aria" else EXAMPLES[key])
             c.image(img, x, y, side, edge=ROLE[role], lw=1.6)
-            c.text(x + side / 2, y - 0.03, name, size=15, weight="bold", va="top")
-            c.text(x + side / 2, y - 0.27, kind, size=13, colour=MUTED, va="top")
+            c.text(x + side / 2, y - 0.03, name, size=13.5, weight="bold", va="top")
+            c.text(x + side / 2, y - 0.25, kind, size=11.5, colour=MUTED, va="top")
 
     # (b) the background-only reference: grouped cross-validated ROC-AUC of background statistics within each cohort
     x0, w = 4.30, 4.30
@@ -1087,7 +1450,8 @@ def fig_graphical_abstract(cfg: Dict, out: str) -> Optional[str]:
     for i, (name, value, role) in enumerate(cohorts):
         ax.barh(i, value, height=0.58, color=ROLE[role], alpha=0.85, zorder=3)
         ax.text(-0.05, i, name, fontsize=15, ha="right", va="center", fontweight="bold", color=ROLE[role])
-        ax.text(value + 0.035, i, f"{value:.2f}", fontsize=15, ha="left", va="center", color=ROLE[role], zorder=6,
+        ax.text(max(value + 0.035, 0.54), i, f"{value:.2f}", fontsize=15, ha="left", va="center",
+                color=ROLE[role], zorder=6,
                 bbox=dict(boxstyle="square,pad=0.1", fc="#F6F6F6", ec="none"))
     ax.axvline(0.5, color=MUTED, linewidth=1.4, linestyle="--", zorder=4)
     ax.text(0.5, -0.75, "chance", fontsize=12, color=MUTED, ha="center", va="bottom")
@@ -1112,7 +1476,7 @@ def fig_graphical_abstract(cfg: Dict, out: str) -> Optional[str]:
     rep_auc = {a: rep.loc[rep["arm"] == a, "roc_auc"].tolist() for a in arms}
     ax_x, ax_w = 10.90, 1.70
     for k, (title, values) in enumerate([("Selection", sel), ("Replicate", rep_auc)]):
-        y_ax, h_ax = 2.48 - k * 2.08, 1.62
+        y_ax, h_ax = 2.42 - k * 2.05, 1.52
         ax = c.fig.add_axes([ax_x / W, y_ax / H, ax_w / W, h_ax / H])
         for i, arm in enumerate(arms):
             v = np.asarray(values[arm], dtype=float)
@@ -1149,6 +1513,7 @@ C1_EXAMPLES = [
 ]
 C1_REF_PERCENTILE = 3.0  # references: the bank rows nearest both tails of the first two principal axes of the Lab means
 CYTOPLASM = (0, 200, 220)
+NUCLEUS = (110, 50, 170)
 
 
 def fig_c1_examples(cfg: Dict, out: str) -> Optional[str]:
@@ -1169,11 +1534,11 @@ def fig_c1_examples(cfg: Dict, out: str) -> Optional[str]:
     tau = float(cfg["morpho_threshold"])
 
     n_cols = 2 + len(refs)
-    side, gap, label_w = 0.98, 0.06, 0.95
+    side, gap, label_w = 1.04, 0.06, 0.95
     head = 0.78
     W = label_w + n_cols * side + (n_cols - 1) * gap + 0.08
     H = head + len(C1_EXAMPLES) * (side + gap) + 0.10
-    c = Canvas(W, H)
+    c = Canvas(W, H, font_scale=FIG_FONT_SCALE)
     x_col = [label_w + j * (side + gap) for j in range(n_cols)]
     y_head = H - head
     c.text(x_col[0] + side / 2, y_head + 0.14, "C-NMC cell", size=7.5, weight="bold")
@@ -1234,16 +1599,19 @@ def ensemble_probs(cfg: Dict, arm: str, cohort: str):
     return np.array([np.mean(probs[n]) for n in names]), np.array([labels[n] for n in names])
 
 
-def fig_reliability(cfg: Dict, out: str, n_bins: int = 10) -> Optional[str]:
+def fig_reliability(cfg: Dict, out: str, n_bins: int = 10, panel: Optional[int] = None) -> Optional[str]:
     """Reliability diagrams of every main arm's seed ensemble per cohort: observed ALL fraction against mean p(ALL)
     in equal-width bins (marker area ~ images in the bin), with the images per bin below."""
     arms = [a for a in cfg["augmentations"] if a != "morpho_mix"] + ["morpho_mix"]
     cohorts = [("val", COHORTS[0][1]), ("test_allidb2", COHORTS[1][1]), ("test_aria", COHORTS[2][1])]
+    if panel is not None:
+        cohorts = [cohorts[panel]]
     data = {(a, k): ensemble_probs(cfg, a, k) for a in arms for k, _ in cohorts}
     if any(v is None for v in data.values()):
         return None
-    fig = plt.figure(figsize=(figstyle.WIDTH_DOUBLE, 3.2), layout="constrained")
-    grid = fig.add_gridspec(2, 3, height_ratios=[3.2, 1])
+    fig = plt.figure(figsize=(figstyle.WIDTH_DOUBLE if panel is None else PANEL_WIDTH, 3.2 + 0.4 * (panel is not None)),
+                     layout="constrained")
+    grid = fig.add_gridspec(2, len(cohorts), height_ratios=[3.2, 1])
     edges = np.linspace(0, 1, n_bins + 1)
     width = 1 / n_bins / (len(arms) + 1)
     for col, (key, title) in enumerate(cohorts):
@@ -1281,18 +1649,30 @@ def fig_reliability(cfg: Dict, out: str, n_bins: int = 10) -> Optional[str]:
     handles, labels = fig.axes[0].get_legend_handles_labels()
     handles.append(plt.Line2D([], [], color="#333333", linestyle=(0, (3, 3)), linewidth=0.8))
     labels.append("perfect calibration")
-    fig.legend(handles, labels, loc="outside lower center", ncol=len(arms) + 1, fontsize=6.4)
+    fig.legend(handles, labels, loc="outside lower center", ncol=len(arms) + 1 if panel is None else 3,
+               fontsize=6.4)
     return figstyle.finish(fig, out)[0]
 
 
 FIGURES: Dict[str, Callable[[Dict, str], Optional[str]]] = {
-    "fig_overview": fig_overview,
+    "fig_study_design": fig_study_design,
+    "fig_cohort_examples": fig_cohort_examples,
+    "fig_morphomix": fig_morphomix,
+    "fig_c1_method": fig_c1_method,
+    "fig_c2_c3_method": fig_c2_c3_method,
+    "fig_field_inference": fig_field_inference,
     "fig_main_results": fig_main_results,
     "fig_shortcut": fig_shortcut,
     "fig_shortcut_residual": partial(fig_shortcut, parts=("residual",)),
     "fig_shortcut_swap": partial(fig_shortcut, parts=("swap",)),
     "fig_ablation": fig_ablation,
     "fig_aux": fig_aux,
+    **{f"{name}_{cohort}": partial(fn, panel=i)
+       for name, fn in (("fig_main_results", fig_main_results), ("fig_ablation", fig_ablation), ("fig_aux", fig_aux),
+                        ("fig_reliability", fig_reliability))
+       for i, cohort in enumerate(("val", "allidb2", "aria"))},
+    **{f"fig_shortcut_{part}_{i}": partial(fig_shortcut, parts=(part,), panel=i)
+       for part in ("residual", "swap") for i in (0, 1)},
     "fig_cam": fig_cam,
     "fig_val_curves": fig_val_curves,
     "fig_graphical_abstract": fig_graphical_abstract,
@@ -1304,7 +1684,7 @@ FIGURES: Dict[str, Callable[[Dict, str], Optional[str]]] = {
 def paperfigs_main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Paper figures from results_dir/tables, predictions and data.")
     ap.add_argument("--only", nargs="+", choices=sorted(FIGURES), default=sorted(FIGURES))
-    ap.add_argument("--out-dir", default=os.path.join("paper", "figures"))
+    ap.add_argument("--out-dir", default=os.path.join("writing", "manuscript", "figures"))
     a = ap.parse_args(argv)
 
     cfg = load_config()
