@@ -67,7 +67,7 @@ classification: a preliminary benchmark of stain and mask-guided augmentations.*
 added here on publication.
 
 The per-image predictions of every reported run (final run and the L_100X_C1 replicate, no images) are attached to
-the release archived on Zenodo (DOI to be added). Checkpoints are available from the corresponding author on request.
+the release archived on Zenodo ([doi:10.5281/zenodo.23556034](https://doi.org/10.5281/zenodo.23556034)). Checkpoints are available from the corresponding author on request.
 
 ## License
 
