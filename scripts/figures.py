@@ -1684,7 +1684,7 @@ FIGURES: Dict[str, Callable[[Dict, str], Optional[str]]] = {
 def paperfigs_main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Paper figures from results_dir/tables, predictions and data.")
     ap.add_argument("--only", nargs="+", choices=sorted(FIGURES), default=sorted(FIGURES))
-    ap.add_argument("--out-dir", default=os.path.join("writing", "manuscript", "figures"))
+    ap.add_argument("--out-dir", default=os.path.join("writing", "publish", "manuscript", "figures"))
     a = ap.parse_args(argv)
 
     cfg = load_config()

@@ -43,14 +43,17 @@ archive/
 *.onnx
 *.ckpt
 
-# Private or local-only material: writing/ (manuscript, references, notes, supervision, campus, coursework, journal
-# guide) and agent scratch space
+# Private or local-only material
+#   writing/publish/     journal paper: manuscript, Overleaf zip, references, notes, supervision, journal guide, release
+#   writing/tata_tulis/  Tata Tulis course: proposal, seminar slides and script, response to the lecturer, matrix
+#   docs/                private decision log
+#   agent_space/         agent scratch space
 writing/
+docs/
 agent_space/
 .claude/
 .agents/
 CLAUDE.md
-docs
 
 # LaTeX build artefacts
 *.aux
@@ -63,13 +66,17 @@ docs
 *.fls
 *.out
 *.synctex.gz
+*.synctex(busy)
 *.toc
+*.lof
+*.lot
 
 # Logs and temporary files
 *.log
 *.tmp
 
-# Operating system and editors
+# Operating system and editors (~$* are Office lock files of open .pptx/.docx/.xlsx)
+~$*
 .DS_Store
 Thumbs.db
 desktop.ini
